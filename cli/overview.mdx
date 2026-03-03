@@ -279,6 +279,73 @@ git config --global credential.https://loom.ghuntley.com.helper 'loom credential
   Thread synchronization server URL
 </ParamField>
 
+## Observability Commands
+
+Loom CLI provides commands for managing crash tracking, cron monitoring, and session analytics.
+
+### Crash Tracking
+
+Manage crash projects, issues, and source maps:
+
+```bash
+# List crash projects
+loom crash projects --org <org-id>
+
+# View issues for a project
+loom crash issues --project <project-id>
+
+# Upload source maps
+loom crash upload-sourcemaps --project <project-id> --release 1.0.0 dist/*.map
+
+# Create a new crash project
+loom crash create-project --org <org-id> --name "My App" --platform javascript
+
+# Manage API keys
+loom crash api-keys --project <project-id>
+loom crash create-api-key --project <project-id> --name "CI Key" --key-type capture
+```
+
+### Cron Monitoring
+
+Manage cron monitors and check-ins:
+
+```bash
+# List monitors
+loom crons monitors --org <org-id>
+
+# Create a monitor
+loom crons create --org <org-id> --slug daily-backup --name "Daily Backup" --cron "0 2 * * *"
+
+# Send check-in pings
+loom crons ping <ping-key>
+loom crons ping-fail <ping-key>
+
+# View monitor stats
+loom crons stats --org <org-id> --slug daily-backup --period week
+
+# Pause/resume monitoring
+loom crons pause --org <org-id> --slug daily-backup
+loom crons resume --org <org-id> --slug daily-backup
+
+# Get organization overview
+loom crons overview --org <org-id>
+```
+
+### Session Analytics
+
+View session health and release adoption:
+
+```bash
+# List sessions for a project
+loom sessions list --project <project-id> --limit 50
+
+# View release health
+loom sessions releases --project <project-id>
+
+# Get session stats
+loom sessions stats --project <project-id> --period week
+```
+
 ## Related Pages
 
 <CardGroup cols={2}>
@@ -290,5 +357,14 @@ git config --global credential.https://loom.ghuntley.com.helper 'loom credential
   </Card>
   <Card title="Authentication" icon="key" href="/cli/auth">
     Device code flow and credential management
+  </Card>
+  <Card title="Crash Tracking" icon="bug" href="/observability/crash-tracking">
+    Error and crash capture with source maps
+  </Card>
+  <Card title="Cron Monitoring" icon="clock" href="/observability/cron-monitoring">
+    Monitor scheduled jobs and tasks
+  </Card>
+  <Card title="Session Analytics" icon="chart-line" href="/observability/sessions">
+    Track session health and release adoption
   </Card>
 </CardGroup>

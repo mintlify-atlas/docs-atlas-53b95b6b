@@ -1,0 +1,502 @@
+---
+title: "Server Capabilities"
+description: "HTTP server for LLM proxy, thread persistence, authentication, and weaver orchestration"
+---
+
+# Server Capabilities
+
+The Loom server is a production-ready HTTP API that provides:
+
+- **LLM Proxy**: Route requests to Anthropic/OpenAI with authentication
+- **Thread Persistence**: Store and sync conversation history
+- **Weaver Orchestration**: Manage ephemeral Kubernetes execution environments
+- **Crash Analytics**: Error tracking and symbolication
+- **Cron Monitoring**: Job scheduling and health checks
+- **Session Analytics**: User session tracking and release health
+
+## Architecture
+
+```
+┌─────────────┐
+│  loom CLI   │─────┐
+└─────────────┘     │
+                    ▼
+┌─────────────┐  ┌──────────────┐  ┌─────────────┐
+│  VS Code    │─▶│ loom-server  │─▶│  Postgres   │
+└─────────────┘  └──────────────┘  └─────────────┘
+                    │       │
+                    ▼       ▼
+              ┌──────┐  ┌─────────┐
+              │ LLMs │  │ K8s Pod │
+              └──────┘  └─────────┘
+```
+
+## Starting the Server
+
+<Tabs>
+  <Tab title="Development">
+    ```bash
+    # Using cargo
+    cargo run --bin loom-server
+    
+    # With custom config
+    LOOM_SERVER_PORT=8080 cargo run --bin loom-server
+    ```
+  </Tab>
+
+  <Tab title="Production (Nix)">
+    ```bash
+    # Build with cargo2nix (faster incremental builds)
+    nix build .#loom-server-c2n
+    
+    # Run
+    ./result/bin/loom-server
+    ```
+  </Tab>
+
+  <Tab title="Docker">
+    ```bash
+    # Build image
+    nix build .#loom-server-image
+    
+    # Load into Docker
+    docker load < result
+    
+    # Run container
+    docker run -p 8080:8080 \
+      -e DATABASE_URL=postgres://... \
+      loom-server:latest
+    ```
+  </Tab>
+</Tabs>
+
+## Configuration
+
+Server configuration is loaded from:
+
+1. Environment variables (`LOOM_SERVER_*`)
+2. `.env` file (via `dotenvy`)
+3. Built-in defaults
+
+### Required Configuration
+
+<ParamField path="DATABASE_URL" type="string" required>
+  PostgreSQL connection string
+  
+  Example: `postgres://user:pass@localhost/loom`
+</ParamField>
+
+### HTTP Server
+
+<ResponseField name="LOOM_SERVER_HOST" type="string">
+  Bind address  
+  Default: `0.0.0.0`
+</ResponseField>
+
+<ResponseField name="LOOM_SERVER_PORT" type="integer">
+  HTTP port  
+  Default: `8080`
+</ResponseField>
+
+### Authentication
+
+<ResponseField name="LOOM_SERVER_AUTH_DEV_MODE" type="boolean">
+  Bypass authentication (development only)  
+  Default: `false`
+</ResponseField>
+
+<ResponseField name="LOOM_SERVER_AUTH_SESSION_CLEANUP_INTERVAL_SECS" type="integer">
+  Session cleanup job interval  
+  Default: `3600` (1 hour)
+</ResponseField>
+
+<ResponseField name="LOOM_SERVER_AUTH_OAUTH_STATE_CLEANUP_INTERVAL_SECS" type="integer">
+  OAuth state cleanup interval  
+  Default: `300` (5 minutes)
+</ResponseField>
+
+### Weaver Configuration
+
+<ResponseField name="LOOM_SERVER_WEAVER_ENABLED" type="boolean">
+  Enable weaver provisioning  
+  Default: `false`
+</ResponseField>
+
+<ResponseField name="LOOM_SERVER_WEAVER_NAMESPACE" type="string">
+  Kubernetes namespace for weavers  
+  Default: `loom-weavers`
+</ResponseField>
+
+<ResponseField name="LOOM_SERVER_WEAVER_CLEANUP_INTERVAL_SECS" type="integer">
+  Weaver TTL cleanup job interval  
+  Default: `60` (1 minute)
+</ResponseField>
+
+### Logging
+
+<ResponseField name="LOOM_SERVER_LOGGING_LEVEL" type="string">
+  Log level: trace, debug, info, warn, error  
+  Default: `info`
+</ResponseField>
+
+## Core APIs
+
+### Health Check
+
+```bash
+GET /health
+```
+
+Returns server status and version information.
+
+<CodeGroup>
+```bash Request
+curl https://loom.ghuntley.com/health
+```
+
+```json Response
+{
+  "status": "ok",
+  "version": "0.1.0",
+  "uptime_secs": 3600
+}
+```
+</CodeGroup>
+
+### LLM Proxy
+
+```bash
+POST /api/llm/complete
+```
+
+<Note>
+  The LLM proxy routes requests to configured providers (Anthropic/OpenAI) while handling authentication, rate limiting, and token management.
+</Note>
+
+**Request:**
+```json
+{
+  "provider": "anthropic",
+  "model": "claude-3-5-sonnet-20241022",
+  "messages": [
+    {"role": "user", "content": "Hello!"}
+  ],
+  "tools": [...],
+  "stream": true
+}
+```
+
+**Streaming Response:**
+- Server-Sent Events (SSE)
+- Event types: `text_delta`, `tool_call_delta`, `completed`, `error`
+
+### Thread APIs
+
+<Tabs>
+  <Tab title="Create/Update">
+    ```bash
+    POST /api/threads
+    PUT /api/threads/:id
+    ```
+    
+    Save or update a conversation thread with full state:
+    - Messages (user, assistant, tool)
+    - Agent state (waiting, executing, error)
+    - Git metadata (branch, commits, remote)
+    - Workspace info
+  </Tab>
+
+  <Tab title="Retrieve">
+    ```bash
+    GET /api/threads/:id
+    ```
+    
+    Fetch a single thread by ID.
+  </Tab>
+
+  <Tab title="List">
+    ```bash
+    GET /api/threads?limit=50
+    ```
+    
+    List threads for authenticated user, sorted by last activity.
+  </Tab>
+
+  <Tab title="Search">
+    ```bash
+    GET /api/threads/search?q=query&limit=20
+    ```
+    
+    Full-text search across:
+    - Message content
+    - Git branch/remote/commit
+    - Tags and metadata
+  </Tab>
+</Tabs>
+
+### Weaver APIs
+
+See [Weavers documentation](./weavers) for complete API reference.
+
+```bash
+# Create weaver
+POST /api/weavers
+
+# List weavers
+GET /api/weavers
+
+# Get weaver status
+GET /api/weavers/:id
+
+# Delete weaver
+DELETE /api/weavers/:id
+
+# Attach to weaver terminal
+GET /api/weavers/:id/attach (WebSocket)
+```
+
+## Background Jobs
+
+The server runs scheduled background jobs using the `JobScheduler`:
+
+<CardGroup cols={2}>
+  <Card title="Weaver Cleanup" icon="trash">
+    Deletes expired weavers based on TTL  
+    Interval: 60 seconds
+  </Card>
+
+  <Card title="Session Cleanup" icon="user-clock">
+    Removes expired auth sessions  
+    Interval: 1 hour
+  </Card>
+
+  <Card title="OAuth State Cleanup" icon="key">
+    Purges expired OAuth states  
+    Interval: 5 minutes
+  </Card>
+
+  <Card title="Job History Cleanup" icon="database">
+    Archives old job execution logs  
+    Interval: 24 hours
+  </Card>
+
+  <Card title="Token Refresh" icon="rotate">
+    Refreshes OAuth tokens for LLM pool  
+    Interval: 5 minutes
+  </Card>
+
+  <Card title="SCM Maintenance" icon="git">
+    Runs git gc on SCM repositories  
+    Interval: Configurable
+  </Card>
+
+  <Card title="Cron Monitoring" icon="clock">
+    Detects missed runs and timeouts  
+    Interval: 60 seconds
+  </Card>
+
+  <Card title="Session Aggregation" icon="chart-line">
+    Aggregates app sessions into metrics  
+    Interval: 1 hour
+  </Card>
+</CardGroup>
+
+## Database Schema
+
+Migrations are in `crates/loom-server/migrations/` as numbered SQL files:
+
+```
+001_initial.sql
+002_threads.sql
+003_auth.sql
+004_weavers.sql
+...
+```
+
+**Migration workflow:**
+1. Create new file: `NNN_description.sql`
+2. Run `cargo2nix-update` to regenerate `Cargo.nix`
+3. Migrations auto-run on server startup
+
+<Warning>
+  Always run `cargo2nix-update` after adding migrations! The Nix build doesn't detect `include_str!` changes automatically.
+</Warning>
+
+## Self-Monitoring
+
+Loom uses itself for crash reporting:
+
+```rust
+// Automatically initialized on server startup
+initialize_self_monitoring(
+  &pool,
+  &base_url,
+  release,
+  &environment,
+).await
+```
+
+Creates crash projects for:
+- `loom-server` (backend crashes)
+- `loom-web` (frontend crashes)
+- `loom-cli` (CLI crashes)
+
+## Deployment
+
+### NixOS Auto-Update
+
+Production server runs NixOS with automatic deployment:
+
+```bash
+# Check deployment status
+sudo systemctl status nixos-auto-update.service
+
+# View logs
+sudo journalctl -u nixos-auto-update.service -f
+
+# Check deployed version
+cat /var/lib/nixos-auto-update/deployed-revision
+
+# Force rebuild
+sudo rm /var/lib/nixos-auto-update/deployed-revision
+sudo systemctl start nixos-auto-update.service
+```
+
+**Deployment flow:**
+1. Push to `trunk` branch
+2. Auto-update service polls every 10 seconds
+3. Pulls latest commit
+4. Rebuilds with Nix
+5. Switches to new configuration
+6. Restarts `loom-server.service`
+
+### Verify Deployment
+
+<Steps>
+  <Step title="Check revision">
+    ```bash
+    cat /var/lib/nixos-auto-update/deployed-revision
+    ```
+  </Step>
+
+  <Step title="Check service status">
+    ```bash
+    sudo systemctl status loom-server
+    ```
+    Look for recent start time.
+  </Step>
+
+  <Step title="Test health endpoint">
+    ```bash
+    curl -s https://loom.ghuntley.com/health | jq .
+    ```
+  </Step>
+</Steps>
+
+## Monitoring
+
+### Logs
+
+```bash
+# Server logs
+sudo journalctl -u loom-server -f
+
+# Last 100 lines
+sudo journalctl -u loom-server -n 100
+
+# Filter by level
+sudo journalctl -u loom-server -p err
+```
+
+### Admin UI
+
+The server includes a log streaming endpoint for admin dashboards:
+
+```bash
+GET /api/admin/logs/stream
+```
+
+Returns Server-Sent Events with structured log entries (redacted secrets).
+
+## Security
+
+### Authentication
+
+- **OAuth 2.0**: GitHub, Google providers
+- **Magic Links**: Email-based passwordless auth
+- **Session Tokens**: Secure, httpOnly cookies
+- **API Keys**: For programmatic access
+
+### Secrets Management
+
+All secrets use `loom-common-secret::SecretString`:
+- Auto-redacts in Debug/Display/Serialize
+- Access via `.expose()` only when needed
+- Never logged by tracing instrumentation
+
+### CORS
+
+Configured to allow:
+- Any origin (development)
+- Any methods
+- Any headers
+
+<Warning>
+  Production deployments should restrict CORS to trusted domains.
+</Warning>
+
+## Performance
+
+### Database Connection Pooling
+
+```rust
+let pool = loom_server::db::create_pool(&database_url).await?;
+```
+
+Uses `sqlx::PgPool` with:
+- Automatic connection management
+- Prepared statement caching
+- Health checks
+
+### Caching
+
+- **Thread Store**: In-memory cache for recent threads
+- **Docs Index**: Loaded once on startup
+- **Job Scheduler**: Periodic task execution without polling
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Server won't start">
+    Check PostgreSQL connection:
+    ```bash
+    psql $DATABASE_URL -c "SELECT 1;"
+    ```
+    
+    Verify migrations:
+    ```bash
+    ls crates/loom-server/migrations/
+    ```
+  </Accordion>
+
+  <Accordion title="Weaver provisioning fails">
+    Check Kubernetes access:
+    ```bash
+    sudo kubectl get pods -n loom-weavers
+    ```
+    
+    Verify namespace exists:
+    ```bash
+    sudo kubectl get namespace loom-weavers
+    ```
+  </Accordion>
+
+  <Accordion title="LLM proxy errors">
+    Enable debug logging:
+    ```bash
+    LOOM_SERVER_LOGGING_LEVEL=debug ./loom-server
+    ```
+    
+    Check provider credentials in database.
+  </Accordion>
+</AccordionGroup>

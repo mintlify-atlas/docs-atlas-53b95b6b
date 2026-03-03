@@ -1,80 +1,324 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: "Quick Start Guide"
+description: "Get started with Loom in minutes - from installation to your first REPL session"
 ---
 
-## Get started in three steps
+## Prerequisites
 
-Get your documentation site running locally and make your first customization.
+Before starting, ensure you have:
 
-### Step 1: Set up your local environment
-
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 2: Deploy your changes
-
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
-
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
-
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 3: Go live
-
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
-
-## Next steps
-
-Now that you have your docs running, explore these key features:
-
-<CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
-</CardGroup>
+- **Nix** (preferred) or **Rust toolchain** (cargo, rustc)
+- A **Loom server** running (default: `http://localhost:8080`)
+- **API keys** configured server-side for your chosen LLM provider
 
 <Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
+  Loom uses a server-side proxy architecture. You don't need API keys on your local machine - they're stored securely on the server.
 </Note>
+
+## Installation
+
+<Steps>
+  <Step title="Build the CLI">
+    Choose your preferred build method:
+
+    <Tabs>
+      <Tab title="Nix (Recommended)">
+        ```bash
+        nix build .#loom-cli-c2n
+        ```
+        
+        The binary will be available at `./result/bin/loom`
+      </Tab>
+      <Tab title="Cargo">
+        ```bash
+        cargo build --release -p loom-cli
+        ```
+        
+        The binary will be at `./target/release/loom`
+      </Tab>
+    </Tabs>
+  </Step>
+
+  <Step title="Configure Server URL">
+    Set your Loom server URL:
+
+    ```bash
+    export LOOM_SERVER_URL=https://loom.ghuntley.com
+    ```
+
+    Or pass it as a flag:
+
+    ```bash
+    loom --server-url https://loom.ghuntley.com
+    ```
+  </Step>
+
+  <Step title="Authenticate">
+    Log in to the Loom server:
+
+    ```bash
+    loom --server-url https://loom.ghuntley.com login
+    ```
+
+    This will open your browser to complete OAuth authentication and store your token securely in the system keyring.
+  </Step>
+
+  <Step title="Start a REPL Session">
+    Launch your first interactive session:
+
+    ```bash
+    loom
+    ```
+
+    You'll see output like:
+
+    ```
+    Welcome to Loom! Type your message and press Enter.
+    Thread ID: 01JK8M3N2P4Q5R6S7T8V9W0X1Y
+    Type 'exit' or press Ctrl+C to quit.
+
+    >
+    ```
+  </Step>
+</Steps>
+
+## Your First Conversation
+
+Let's try a simple interaction:
+
+<CodeGroup>
+```bash User Input
+> Read the README.md file and summarize its contents
+```
+
+```bash Agent Response
+I'll read the README file for you.
+
+[Tool: read_file]
+{"file_path": "README.md"}
+
+Based on the README, this project is Loom - an AI-powered coding 
+agent built in Rust. It provides:
+
+1. A REPL interface for LLM interactions
+2. Server-side proxy architecture for API keys
+3. 30+ specialized Rust crates
+4. Support for Anthropic and OpenAI providers
+5. Tools for file operations and web search
+
+The project is experimental and under active development.
+```
+</CodeGroup>
+
+## Available Commands
+
+### Session Management
+
+```bash
+# Start a new session (default)
+loom
+
+# List all threads
+loom list
+
+# Resume the most recent thread
+loom resume
+
+# Resume a specific thread
+loom resume 01JK8M3N2P4Q5R6S7T8V9W0X1Y
+
+# Start a private local-only session (never syncs)
+loom private
+```
+
+### Thread Search
+
+```bash
+# Search threads by content, branch, repo, or commit SHA
+loom search "authentication"
+loom search "feature-branch"
+loom search "a3f2c1b"  # commit SHA prefix
+
+# Limit results
+loom search "bug fix" --limit 5
+
+# Output as JSON
+loom search "refactor" --json
+```
+
+### Thread Sharing
+
+```bash
+# Share thread with support team
+loom share --support
+
+# Change visibility
+loom share --visibility organization
+loom share --visibility private
+loom share --visibility public
+
+# Share specific thread
+loom share 01JK8M3N2P4Q5R6S7T8V9W0X1Y --support
+```
+
+## Provider Selection
+
+Choose your LLM provider:
+
+```bash
+# Use Anthropic (Claude) - default
+loom --provider anthropic
+
+# Use OpenAI (GPT)
+loom --provider openai
+
+# Or set via environment variable
+export LOOM_LLM_PROVIDER=anthropic
+loom
+```
+
+<Note>
+  Provider models are configured server-side. The `--provider` flag only selects which proxy endpoint to use.
+</Note>
+
+## Remote Execution with Weavers
+
+Weavers are ephemeral Kubernetes pods for running Loom sessions in isolated environments:
+
+<Steps>
+  <Step title="Create a Weaver">
+    ```bash
+    loom new --image ghcr.io/ghuntley/loom/weaver:latest \
+      --repo https://github.com/user/repo \
+      --branch main \
+      --ttl 4
+    ```
+  </Step>
+
+  <Step title="List Running Weavers">
+    ```bash
+    loom weaver ps
+    ```
+  </Step>
+
+  <Step title="Attach to a Weaver">
+    ```bash
+    loom attach <weaver-id>
+    ```
+  </Step>
+
+  <Step title="Delete a Weaver">
+    ```bash
+    loom weaver delete <weaver-id>
+    ```
+  </Step>
+</Steps>
+
+## Configuration
+
+Loom uses a layered configuration system:
+
+1. **Default values** - Built-in defaults
+2. **Config file** - `~/.config/loom/config.toml`
+3. **Environment variables** - `LOOM_*` prefixed
+4. **CLI arguments** - Highest priority
+
+### Example Config File
+
+```toml ~/.config/loom/config.toml
+[global]
+default_provider = "anthropic"
+workspace_root = "/home/user/projects"
+
+[logging]
+level = "info"
+format = "pretty"  # or "json", "compact"
+
+[tools.workspace]
+root = "/home/user/workspace"
+```
+
+## Auto-Commit Feature
+
+Loom automatically creates git commits when file-modifying tools are executed:
+
+```bash
+# Auto-commit is enabled by default
+loom
+
+# Disable auto-commit
+LOOM_AUTO_COMMIT_DISABLE=1 loom
+```
+
+When enabled, Loom uses Claude Haiku to generate commit messages based on:
+- File changes detected
+- Tools executed (`edit_file`, `bash`)
+- Conversation context
+
+<Warning>
+  Auto-commit only works in git repositories. It will skip commits if:
+  - Not in a git repo
+  - No changes detected
+  - Diff exceeds 32KB
+</Warning>
+
+## Logging
+
+Control log output:
+
+```bash
+# Set log level
+loom --log-level debug
+loom --log-level info
+loom --log-level warn
+
+# JSON logs for structured parsing
+loom --json-logs
+
+# Or via environment
+export RUST_LOG=loom=debug
+loom
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Installation Details" icon="wrench" href="/installation">
+    Learn about Nix builds, cargo2nix, and development workflows
+  </Card>
+  <Card title="Tool System" icon="toolbox">
+    Explore the available tools and how to implement custom tools
+  </Card>
+  <Card title="Thread System" icon="database">
+    Understand conversation persistence and FTS5 search
+  </Card>
+  <Card title="Specifications" icon="book">
+    Read design docs in `specs/README.md` for architecture details
+  </Card>
+</CardGroup>
+
+## Troubleshooting
+
+### Connection Refused
+
+If you see `Connection refused` errors:
+
+1. Verify the server is running: `curl http://localhost:8080/health`
+2. Check your `--server-url` matches the actual server
+3. Ensure you're authenticated: `loom login`
+
+### Authentication Errors
+
+401 Unauthorized responses mean:
+
+- You're not logged in: Run `loom login`
+- Your token expired: Run `loom logout` then `loom login`
+- Server authentication is misconfigured
+
+### Tool Execution Failures
+
+If tools fail:
+
+- Check workspace permissions: `ls -la $(pwd)`
+- Verify you're in the correct directory
+- Check logs with `--log-level debug`

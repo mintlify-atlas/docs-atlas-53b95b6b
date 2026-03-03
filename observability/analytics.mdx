@@ -1,0 +1,463 @@
+---
+title: "Analytics"
+description: "PostHog-style product analytics with identity resolution and event tracking"
+---
+
+## Overview
+
+Loom's analytics system provides PostHog-style product analytics for tracking user behavior, running experiments, and analyzing conversion funnels. The system supports both anonymous and identified users with automatic identity resolution.
+
+<Note>
+Analytics integrates with feature flags to automatically track flag exposures for experiment analysis.
+</Note>
+
+## Key Features
+
+- **Person profiles** for anonymous and identified users
+- **Event tracking** with flexible properties  
+- **Identity resolution** linking anonymous sessions to authenticated users
+- **Multi-tenant** analytics scoped to organizations
+- **API keys** for client-side (write-only) and server-side (read/write) access
+
+## Core Concepts
+
+### Person
+
+A person represents a user being tracked, identified by one or more `distinct_id` values:
+
+```rust
+pub struct Person {
+    pub id: PersonId,
+    pub org_id: OrgId,
+    pub properties: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+```
+
+### Event
+
+Events track user actions with an event name, distinct ID, and optional properties:
+
+```rust
+pub struct Event {
+    pub id: EventId,
+    pub org_id: OrgId,
+    pub person_id: Option<PersonId>,
+    pub distinct_id: String,
+    pub event_name: String,
+    pub properties: serde_json::Value,
+    pub timestamp: DateTime<Utc>,
+    pub ip_address: Option<SecretString>,
+    pub user_agent: Option<String>,
+}
+```
+
+**Event naming conventions:**
+- Lowercase alphanumeric with `_`, `$`, or `.`
+- Must start with lowercase letter or `$` (for system events)
+- Maximum 200 characters
+- Examples: `button_clicked`, `$pageview`, `checkout.completed`
+
+### Identity Resolution
+
+Loom uses PostHog's identity model:
+
+<Steps>
+  <Step title="Anonymous user arrives">
+    SDK generates UUIDv7, stored in localStorage/cookie as `distinct_id`
+  </Step>
+  
+  <Step title="Events captured">
+    All events tagged with this anonymous `distinct_id`
+  </Step>
+  
+  <Step title="User identifies">
+    SDK calls `identify(anonymous_id, user_id)` with real identifier
+  </Step>
+  
+  <Step title="Merge occurs">
+    Both distinct_ids linked to same Person, properties merged
+  </Step>
+  
+  <Step title="Future events">
+    Can use either distinct_id, both resolve to same Person
+  </Step>
+</Steps>
+
+## Rust SDK
+
+Install the SDK:
+
+```toml
+[dependencies]
+loom-analytics = { version = "0.1" }
+```
+
+### Basic Usage
+
+```rust
+use loom_analytics::AnalyticsClient;
+
+// Initialize client
+let client = AnalyticsClient::builder()
+    .api_key("loom_analytics_write_xxx")
+    .base_url("https://loom.example.com")
+    .flush_interval(Duration::from_secs(10))
+    .build()?;
+
+// Capture event
+client.capture(
+    "button_clicked", 
+    "user_123",
+    Properties::new()
+        .insert("button_name", "checkout")
+        .insert("page", "/cart")
+).await?;
+
+// Identify user (link anonymous to authenticated)
+client.identify(
+    "anon_abc123",
+    "user@example.com",
+    Properties::new()
+        .insert("plan", "pro")
+        .insert("company", "Acme Inc")
+).await?;
+
+// Set person properties
+client.set(
+    "user@example.com",
+    Properties::new()
+        .insert("last_login", Utc::now().to_rfc3339())
+).await?;
+
+// Shutdown (flushes pending events)
+client.shutdown().await?;
+```
+
+## TypeScript SDK
+
+Install the SDK:
+
+```bash
+npm install @loom/analytics
+```
+
+### Browser Usage
+
+```typescript
+import { AnalyticsClient } from '@loom/analytics';
+
+// Initialize (browser)
+const analytics = new AnalyticsClient({
+  apiKey: 'loom_analytics_write_xxx',
+  baseUrl: 'https://loom.example.com',
+  persistence: 'localStorage+cookie',
+  autocapture: true, // Auto-capture $pageview
+});
+
+// Capture event
+analytics.capture('button_clicked', {
+  button_name: 'checkout',
+  page: '/cart',
+});
+
+// Identify user
+analytics.identify('user@example.com', {
+  plan: 'pro',
+  company: 'Acme Inc',
+});
+
+// Get current distinct_id
+const distinctId = analytics.getDistinctId();
+
+// Reset on logout (generates new distinct_id)
+analytics.reset();
+```
+
+## Special Events
+
+System events use the `$` prefix:
+
+| Event | Description |
+|-------|-------------|
+| `$pageview` | Page view (auto-captured by web SDK) |
+| `$pageleave` | Page leave |
+| `$identify` | Logged when identify() called |
+| `$feature_flag_called` | Feature flag evaluated |
+
+## Person Properties vs Event Properties
+
+<CardGroup cols={2}>
+  <Card title="Person Properties" icon="user">
+    Persistent attributes attached to the Person
+    
+    Examples: `email`, `plan`, `company`
+    
+    Set via `identify()` or `set()`
+  </Card>
+  
+  <Card title="Event Properties" icon="bolt">
+    Ephemeral data for a single event
+    
+    Examples: `button_name`, `page_url`, `order_value`
+    
+    Set via `capture()` properties parameter
+  </Card>
+</CardGroup>
+
+## API Keys
+
+<Warning>
+Use **Write-only** keys for client-side code (safe to expose). Use **Read/Write** keys only server-side.
+</Warning>
+
+| Type | Prefix | Capabilities | Use Case |
+|------|--------|--------------|----------|
+| Write | `loom_analytics_write_` | Capture, identify, alias | Client-side (browser, mobile) |
+| Read/Write | `loom_analytics_rw_` | All write + query/export | Server-side only |
+
+### Creating API Keys
+
+```bash
+curl -X POST https://loom.example.com/api/analytics/api-keys \
+  -H "Authorization: Bearer <user_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Production Web SDK",
+    "key_type": "write"
+  }'
+```
+
+## API Endpoints
+
+### Capture Events
+
+<ParamField path="POST /api/analytics/capture" type="endpoint">
+  Capture a single event
+  
+  **Request:**
+  ```json
+  {
+    "distinct_id": "user_123",
+    "event": "button_clicked",
+    "properties": {
+      "button_name": "checkout"
+    },
+    "timestamp": "2026-01-18T12:00:00Z"
+  }
+  ```
+</ParamField>
+
+<ParamField path="POST /api/analytics/batch" type="endpoint">
+  Capture multiple events in one request
+  
+  **Request:**
+  ```json
+  {
+    "batch": [
+      {
+        "distinct_id": "user_123",
+        "event": "page_viewed",
+        "properties": { "page": "/dashboard" }
+      },
+      {
+        "distinct_id": "user_123",
+        "event": "button_clicked",
+        "properties": { "button": "export" }
+      }
+    ]
+  }
+  ```
+</ParamField>
+
+### Identity Operations
+
+<ParamField path="POST /api/analytics/identify" type="endpoint">
+  Link anonymous distinct_id to authenticated user
+  
+  **Request:**
+  ```json
+  {
+    "distinct_id": "anon_abc123",
+    "user_id": "user@example.com",
+    "properties": {
+      "plan": "pro",
+      "email": "user@example.com"
+    }
+  }
+  ```
+</ParamField>
+
+<ParamField path="POST /api/analytics/alias" type="endpoint">
+  Link two distinct_ids together
+  
+  **Request:**
+  ```json
+  {
+    "distinct_id": "user@example.com",
+    "alias": "user_legacy_id_456"
+  }
+  ```
+</ParamField>
+
+<ParamField path="POST /api/analytics/set" type="endpoint">
+  Update person properties
+  
+  **Request:**
+  ```json
+  {
+    "distinct_id": "user@example.com",
+    "properties": {
+      "last_login": "2026-01-18T12:00:00Z",
+      "login_count": 42
+    }
+  }
+  ```
+</ParamField>
+
+### Query APIs
+
+<Note>
+Query endpoints require a **Read/Write** API key.
+</Note>
+
+<ParamField path="GET /api/analytics/persons" type="endpoint">
+  List persons for organization
+  
+  **Query Parameters:**
+  - `limit` - Max results (default: 100)
+  - `offset` - Pagination offset
+</ParamField>
+
+<ParamField path="GET /api/analytics/persons/by-distinct-id/:distinct_id" type="endpoint">
+  Get person by distinct_id
+  
+  **Response:**
+  ```json
+  {
+    "person": {
+      "id": "per_xxx",
+      "properties": {
+        "email": "user@example.com",
+        "plan": "pro"
+      }
+    },
+    "identities": [
+      {
+        "distinct_id": "anon_abc123",
+        "identity_type": "anonymous"
+      },
+      {
+        "distinct_id": "user@example.com",
+        "identity_type": "identified"
+      }
+    ]
+  }
+  ```
+</ParamField>
+
+<ParamField path="GET /api/analytics/events" type="endpoint">
+  Query events with filters
+  
+  **Query Parameters:**
+  - `event_name` - Filter by event name
+  - `distinct_id` - Filter by distinct_id
+  - `start_date` - Start timestamp (ISO 8601)
+  - `end_date` - End timestamp (ISO 8601)
+  - `limit` - Max results
+</ParamField>
+
+## Experiment Integration
+
+Analytics automatically tracks feature flag exposures for A/B testing:
+
+```typescript
+// When a flag is evaluated, this event is auto-captured:
+{
+  event: "$feature_flag_called",
+  properties: {
+    "$feature_flag": "checkout.new_flow",
+    "$feature_flag_response": "treatment_a"
+  }
+}
+
+// Track conversion metric
+analytics.capture('checkout_completed', {
+  order_value: 99.00,
+  currency: 'USD'
+});
+```
+
+Query experiment results by joining flag exposures with conversion events:
+
+```sql
+SELECT
+  el.variant,
+  COUNT(DISTINCT ae.person_id) as conversions,
+  COUNT(DISTINCT el.user_id) as exposures,
+  CAST(COUNT(DISTINCT ae.person_id) AS REAL) / 
+    COUNT(DISTINCT el.user_id) as conversion_rate
+FROM exposure_logs el
+LEFT JOIN analytics_person_identities api 
+  ON api.distinct_id = el.user_id
+LEFT JOIN analytics_events ae 
+  ON ae.person_id = api.person_id
+  AND ae.event_name = 'checkout_completed'
+  AND ae.timestamp > el.timestamp
+WHERE el.flag_key = 'checkout.new_flow'
+GROUP BY el.variant;
+```
+
+## Validation & Limits
+
+<Warning>
+Events that exceed validation limits will be rejected.
+</Warning>
+
+| Field | Validation |
+|-------|------------|
+| Event name | Max 200 chars, lowercase alphanumeric + `_.$` |
+| Properties | Max 1 MB JSON |
+| Distinct ID | Max 200 chars |
+| IP Address | Automatically redacted in logs (stored as `SecretString`) |
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Use Descriptive Names" icon="tag">
+    Event names should be clear and consistent:
+    
+    ✅ `checkout_completed`, `video_played`
+    
+    ❌ `action_1`, `event`, `click`
+  </Card>
+  
+  <Card title="Property Consistency" icon="table">
+    Use consistent property names across events:
+    
+    ✅ Always use `page_url` for URLs
+    
+    ❌ Mix `url`, `page`, `page_url`
+  </Card>
+  
+  <Card title="Reset on Logout" icon="arrow-rotate-right">
+    Call `analytics.reset()` when users log out to start fresh session
+  </Card>
+  
+  <Card title="Client-Side Keys" icon="lock">
+    Only use **Write** API keys in client-side code (safe to expose publicly)
+  </Card>
+</CardGroup>
+
+## See Also
+
+<CardGroup cols={2}>
+  <Card title="Crash Tracking" icon="bug" href="/observability/crash-tracking">
+    Link crashes to person profiles
+  </Card>
+  
+  <Card title="Sessions" icon="clock" href="/observability/sessions">
+    Track user engagement periods
+  </Card>
+</CardGroup>

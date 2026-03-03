@@ -1,0 +1,473 @@
+---
+title: Configuration Reference
+description: Complete environment variable and configuration file reference for loom-server
+---
+
+## Configuration Sources
+
+Loom server loads configuration from multiple sources with the following precedence (highest to lowest):
+
+1. **Environment variables** (`LOOM_SERVER_*`)
+2. **Configuration file** (`/etc/loom/server.toml`)
+3. **Built-in defaults**
+
+All configuration can be set via environment variables, NixOS module options, or TOML file.
+
+## HTTP Server
+
+### Basic Settings
+
+<ParamField path="LOOM_SERVER_HOST" type="string" default="127.0.0.1">
+  Address to bind the HTTP server to. Use `0.0.0.0` to listen on all interfaces.
+</ParamField>
+
+<ParamField path="LOOM_SERVER_PORT" type="integer" default="8080">
+  Port to listen on.
+</ParamField>
+
+<ParamField path="LOOM_SERVER_BASE_URL" type="string" default="http://localhost:8080">
+  Base URL of the server (e.g., `https://loom.example.com`). Used for OAuth redirect URIs and email links.
+</ParamField>
+
+### Example
+
+```bash
+export LOOM_SERVER_HOST=0.0.0.0
+export LOOM_SERVER_PORT=8080
+export LOOM_SERVER_BASE_URL=https://loom.example.com
+```
+
+## Database
+
+<ParamField path="LOOM_SERVER_DATABASE_URL" type="string" default="sqlite:loom.db">
+  SQLite database connection string. Must start with `sqlite:`.
+</ParamField>
+
+### SQLite Options
+
+```bash
+# Read-write-create mode (default)
+export LOOM_SERVER_DATABASE_URL=sqlite:/var/lib/loom-server/loom.db?mode=rwc
+
+# Custom journal mode
+export LOOM_SERVER_DATABASE_URL=sqlite:/var/lib/loom-server/loom.db?mode=rwc&journal_mode=WAL
+
+# In-memory (testing only)
+export LOOM_SERVER_DATABASE_URL=sqlite::memory:
+```
+
+<Warning>
+Database migrations run automatically on server startup. The server will fail to start if migrations fail.
+</Warning>
+
+## LLM Providers
+
+Configure at least one LLM provider. The server supports Anthropic, OpenAI, Vertex AI, and Z.ai.
+
+### Anthropic Claude
+
+<ParamField path="LOOM_SERVER_ANTHROPIC_API_KEY" type="string" secret>
+  Anthropic API key (starts with `sk-ant-`).
+</ParamField>
+
+<ParamField path="LOOM_SERVER_ANTHROPIC_MODEL" type="string" default="claude-sonnet-4-20250514">
+  Model identifier to use.
+</ParamField>
+
+<ParamField path="LOOM_SERVER_ANTHROPIC_OAUTH_ENABLED" type="boolean" default="false">
+  Enable OAuth pool mode for Claude Max subscriptions (mutually exclusive with `API_KEY`).
+</ParamField>
+
+<ParamField path="LOOM_SERVER_ANTHROPIC_OAUTH_CREDENTIAL_FILE" type="string" default="/var/lib/loom-server/anthropic-credentials.json">
+  Path to OAuth credential store when using pool mode.
+</ParamField>
+
+### OpenAI
+
+<ParamField path="LOOM_SERVER_OPENAI_API_KEY" type="string" secret>
+  OpenAI API key (starts with `sk-`).
+</ParamField>
+
+<ParamField path="LOOM_SERVER_OPENAI_MODEL" type="string" default="gpt-4o">
+  Model identifier to use.
+</ParamField>
+
+<ParamField path="LOOM_SERVER_OPENAI_ORG" type="string" optional>
+  OpenAI organization ID for enterprise accounts.
+</ParamField>
+
+### Vertex AI (Google)
+
+<ParamField path="GOOGLE_APPLICATION_CREDENTIALS" type="string">
+  Path to Google Cloud service account credentials JSON file.
+</ParamField>
+
+<ParamField path="LOOM_SERVER_VERTEX_PROJECT_ID" type="string">
+  Google Cloud project ID.
+</ParamField>
+
+<ParamField path="LOOM_SERVER_VERTEX_LOCATION" type="string" default="us-central1">
+  Google Cloud region.
+</ParamField>
+
+### Z.ai (ZhipuAI)
+
+<ParamField path="LOOM_SERVER_ZAI_API_KEY" type="string" secret>
+  Z.ai API key.
+</ParamField>
+
+<ParamField path="LOOM_SERVER_ZAI_MODEL" type="string" default="glm-4.7">
+  Model identifier to use.
+</ParamField>
+
+## Authentication
+
+### General Settings
+
+<ParamField path="LOOM_SERVER_SIGNUPS_DISABLED" type="boolean" default="false">
+  Disable new user signups. Existing users can still log in.
+</ParamField>
+
+<ParamField path="LOOM_SERVER_AUTH_DEV_MODE" type="boolean" default="false">
+  Enable development mode (auto-authenticate without OAuth). **Never use in production.**
+</ParamField>
+
+<ParamField path="LOOM_SERVER_DEFAULT_LOCALE" type="string" default="en">
+  Default locale for emails and user-facing content (`en`, `es`, `ar`).
+</ParamField>
+
+### GitHub OAuth
+
+<ParamField path="LOOM_SERVER_GITHUB_CLIENT_ID" type="string" secret>
+  GitHub OAuth application client ID.
+</ParamField>
+
+<ParamField path="LOOM_SERVER_GITHUB_CLIENT_SECRET" type="string" secret>
+  GitHub OAuth application client secret.
+</ParamField>
+
+<ParamField path="LOOM_SERVER_GITHUB_REDIRECT_URI" type="string" optional>
+  OAuth callback URL. Defaults to `{baseUrl}/auth/github/callback`.
+</ParamField>
+
+### Google OAuth
+
+<ParamField path="LOOM_SERVER_GOOGLE_CLIENT_ID" type="string" secret>
+  Google OAuth application client ID.
+</ParamField>
+
+<ParamField path="LOOM_SERVER_GOOGLE_CLIENT_SECRET" type="string" secret>
+  Google OAuth application client secret.
+</ParamField>
+
+<ParamField path="LOOM_SERVER_GOOGLE_REDIRECT_URI" type="string" optional>
+  OAuth callback URL. Defaults to `{baseUrl}/auth/google/callback`.
+</ParamField>
+
+### Okta OAuth (Enterprise SSO)
+
+<ParamField path="LOOM_SERVER_OKTA_DOMAIN" type="string">
+  Okta domain (e.g., `your-org.okta.com`).
+</ParamField>
+
+<ParamField path="LOOM_SERVER_OKTA_CLIENT_ID" type="string" secret>
+  Okta OAuth application client ID.
+</ParamField>
+
+<ParamField path="LOOM_SERVER_OKTA_CLIENT_SECRET" type="string" secret>
+  Okta OAuth application client secret.
+</ParamField>
+
+## Weaver Provisioning
+
+<ParamField path="LOOM_SERVER_WEAVER_ENABLED" type="boolean" default="false">
+  Enable Kubernetes-based weaver provisioning.
+</ParamField>
+
+<ParamField path="LOOM_SERVER_WEAVER_K8S_NAMESPACE" type="string" default="loom-weavers">
+  Kubernetes namespace for weavers.
+</ParamField>
+
+<ParamField path="KUBECONFIG" type="string" default="/etc/rancher/k3s/k3s.yaml">
+  Path to kubeconfig file.
+</ParamField>
+
+<ParamField path="LOOM_SERVER_WEAVER_CLEANUP_INTERVAL_SECS" type="integer" default="1800">
+  Interval in seconds between cleanup runs for expired weavers.
+</ParamField>
+
+<ParamField path="LOOM_SERVER_WEAVER_DEFAULT_TTL_HOURS" type="integer" default="4">
+  Default TTL in hours for weavers.
+</ParamField>
+
+<ParamField path="LOOM_SERVER_WEAVER_MAX_TTL_HOURS" type="integer" default="48">
+  Maximum TTL in hours for weavers.
+</ParamField>
+
+<ParamField path="LOOM_SERVER_WEAVER_MAX_CONCURRENT" type="integer" default="64">
+  Maximum number of concurrent weavers.
+</ParamField>
+
+<ParamField path="LOOM_SERVER_WEAVER_READY_TIMEOUT_SECS" type="integer" default="60">
+  Timeout in seconds waiting for weaver to become ready.
+</ParamField>
+
+<ParamField path="LOOM_SERVER_WEAVER_IMAGE_PULL_SECRETS" type="string" optional>
+  Comma-separated list of Kubernetes secret names for pulling private images (e.g., `ghcr-secret`).
+</ParamField>
+
+### Audit Sidecar
+
+<ParamField path="LOOM_SERVER_WEAVER_AUDIT_ENABLED" type="boolean" default="true">
+  Enable eBPF audit sidecar for weavers.
+</ParamField>
+
+<ParamField path="LOOM_SERVER_WEAVER_AUDIT_IMAGE" type="string" default="ghcr.io/ghuntley/loom-audit-sidecar:latest">
+  Container image for audit sidecar.
+</ParamField>
+
+<ParamField path="LOOM_SERVER_WEAVER_AUDIT_BATCH_INTERVAL_MS" type="integer" default="100">
+  Event batch interval in milliseconds.
+</ParamField>
+
+<ParamField path="LOOM_SERVER_WEAVER_AUDIT_BUFFER_MAX_BYTES" type="integer" default="268435456">
+  Maximum local buffer size in bytes (256 MB).
+</ParamField>
+
+## SMTP Email
+
+<ParamField path="LOOM_SERVER_SMTP_HOST" type="string" default="127.0.0.1">
+  SMTP server hostname.
+</ParamField>
+
+<ParamField path="LOOM_SERVER_SMTP_PORT" type="integer" default="2525">
+  SMTP server port.
+</ParamField>
+
+<ParamField path="LOOM_SERVER_SMTP_USERNAME" type="string" optional>
+  SMTP username for authentication.
+</ParamField>
+
+<ParamField path="LOOM_SERVER_SMTP_PASSWORD" type="string" secret optional>
+  SMTP password for authentication.
+</ParamField>
+
+<ParamField path="LOOM_SERVER_SMTP_FROM_ADDRESS" type="string">
+  Email address to send from (e.g., `noreply@example.com`).
+</ParamField>
+
+<ParamField path="LOOM_SERVER_SMTP_FROM_NAME" type="string" default="Loom">
+  Display name for sent emails.
+</ParamField>
+
+<ParamField path="LOOM_SERVER_SMTP_USE_TLS" type="boolean" default="false">
+  Use TLS for SMTP connection.
+</ParamField>
+
+## GitHub App Integration
+
+<ParamField path="LOOM_SERVER_GITHUB_APP_ID" type="string" secret>
+  GitHub App ID.
+</ParamField>
+
+<ParamField path="LOOM_SERVER_GITHUB_APP_PRIVATE_KEY" type="string" secret>
+  GitHub App private key (PEM format).
+</ParamField>
+
+<ParamField path="LOOM_SERVER_GITHUB_APP_WEBHOOK_SECRET" type="string" secret optional>
+  GitHub webhook secret for verifying payloads.
+</ParamField>
+
+<ParamField path="LOOM_SERVER_GITHUB_APP_SLUG" type="string" default="loom">
+  GitHub App slug (appears in installation URLs).
+</ParamField>
+
+<ParamField path="LOOM_SERVER_GITHUB_APP_BASE_URL" type="string" default="https://api.github.com">
+  GitHub API base URL (for GitHub Enterprise Server).
+</ParamField>
+
+## Search Providers
+
+### Google Custom Search Engine
+
+<ParamField path="LOOM_SERVER_GOOGLE_CSE_API_KEY" type="string" secret>
+  Google API key.
+</ParamField>
+
+<ParamField path="LOOM_SERVER_GOOGLE_CSE_SEARCH_ENGINE_ID" type="string" secret>
+  Google Custom Search Engine ID.
+</ParamField>
+
+### Serper.dev
+
+<ParamField path="LOOM_SERVER_SERPER_API_KEY" type="string" secret>
+  Serper API key.
+</ParamField>
+
+## Background Jobs
+
+<ParamField path="LOOM_SERVER_JOB_ALERT_ENABLED" type="boolean" default="false">
+  Enable email alerts for job failures.
+</ParamField>
+
+<ParamField path="LOOM_SERVER_JOB_ALERT_RECIPIENTS" type="string" optional>
+  Comma-separated list of email recipients for job failure alerts.
+</ParamField>
+
+<ParamField path="LOOM_SERVER_JOB_HISTORY_RETENTION_DAYS" type="integer" default="90">
+  Number of days to retain job run history.
+</ParamField>
+
+<ParamField path="LOOM_SERVER_SESSION_CLEANUP_INTERVAL_SECS" type="integer" default="3600">
+  Interval in seconds between session cleanup runs.
+</ParamField>
+
+<ParamField path="LOOM_SERVER_OAUTH_STATE_CLEANUP_INTERVAL_SECS" type="integer" default="900">
+  Interval in seconds between OAuth state cleanup runs.
+</ParamField>
+
+### Git Repository Maintenance
+
+<ParamField path="LOOM_SERVER_SCM_MAINTENANCE_ENABLED" type="boolean" default="true">
+  Enable periodic git maintenance (gc, prune, repack, fsck) on SCM repositories.
+</ParamField>
+
+<ParamField path="LOOM_SERVER_SCM_MAINTENANCE_INTERVAL_SECS" type="integer" default="86400">
+  Interval in seconds between maintenance runs (24 hours).
+</ParamField>
+
+<ParamField path="LOOM_SERVER_SCM_MAINTENANCE_STAGGER_MS" type="integer" default="100">
+  Delay in milliseconds between processing each repository.
+</ParamField>
+
+## SCIM Provisioning
+
+<ParamField path="LOOM_SERVER_SCIM_ENABLED" type="boolean" default="false">
+  Enable SCIM 2.0 provisioning for enterprise IdP integration.
+</ParamField>
+
+<ParamField path="LOOM_SERVER_SCIM_TOKEN" type="string" secret>
+  SCIM bearer token shared with your IdP (e.g., Okta).
+  
+  Generate with: `openssl rand -base64 32`
+</ParamField>
+
+<ParamField path="LOOM_SERVER_SCIM_ORG_ID" type="string">
+  UUID of the organization to provision users into.
+</ParamField>
+
+## Weaver Secrets System
+
+<ParamField path="LOOM_SECRETS_MASTER_KEY_FILE" type="string">
+  Path to file containing master encryption key (256-bit, base64-encoded).
+  
+  Generate with: `openssl rand -base64 32 > /run/secrets/loom-master-key`
+</ParamField>
+
+<ParamField path="LOOM_SECRETS_SVID_SIGNING_KEY_FILE" type="string" optional>
+  Path to file containing SVID signing key (Ed25519 PEM). Auto-generated if not set.
+  
+  Generate with: `openssl genpkey -algorithm Ed25519 -out /run/secrets/svid-signing-key.pem`
+</ParamField>
+
+<ParamField path="LOOM_SECRETS_SVID_TTL_SECONDS" type="integer" default="900">
+  TTL in seconds for issued SVID tokens (15 minutes).
+</ParamField>
+
+<ParamField path="LOOM_SECRETS_VERIFY_POD_EXISTS" type="boolean" default="true">
+  Verify weaver Pods exist in Kubernetes before issuing SVIDs.
+</ParamField>
+
+## GeoIP Lookup
+
+<ParamField path="LOOM_SERVER_GEOIP_DATABASE_PATH" type="string" default="/var/lib/GeoIP/GeoLite2-City.mmdb">
+  Path to MaxMind GeoIP database file.
+</ParamField>
+
+## Logging
+
+<ParamField path="RUST_LOG" type="string" default="info">
+  Log level: `trace`, `debug`, `info`, `warn`, `error`.
+</ParamField>
+
+### Structured Logging
+
+Loom uses structured logging with automatic secret redaction:
+
+```bash
+export RUST_LOG=info,loom_server=debug,sqlx=warn
+```
+
+## Paths
+
+<ParamField path="LOOM_SERVER_DATA_DIR" type="string" default="/var/lib/loom">
+  Base directory for data storage (repos, uploads, etc.).
+</ParamField>
+
+<ParamField path="LOOM_SERVER_BIN_DIR" type="string" optional>
+  Directory containing CLI binaries for distribution at `/bin/{platform}`.
+</ParamField>
+
+<ParamField path="LOOM_SERVER_DOCS_INDEX" type="string" optional>
+  Path to `docs-index.json` for documentation search.
+</ParamField>
+
+## NixOS Configuration
+
+All environment variables can be set via the NixOS module:
+
+```nix configuration.nix
+services.loom-server = {
+  enable = true;
+  
+  # HTTP
+  host = "0.0.0.0";
+  port = 8080;
+  baseUrl = "https://loom.example.com";
+  
+  # Database
+  databasePath = "/var/lib/loom-server/loom.db";
+  
+  # LLM Providers
+  anthropic = {
+    enable = true;
+    apiKeyFile = "/run/secrets/anthropic-api-key";
+    model = "claude-sonnet-4-20250514";
+  };
+  
+  # Weaver
+  weaver = {
+    enable = true;
+    namespace = "loom-weavers";
+    imagePullSecrets = [ "ghcr-secret" ];
+  };
+  
+  # SMTP
+  smtp = {
+    enable = true;
+    host = "smtp.example.com";
+    port = 587;
+    fromAddress = "noreply@example.com";
+    useTLS = true;
+  };
+};
+```
+
+## Validation
+
+The server validates configuration on startup:
+
+- **Dev mode + production**: Fails if `LOOM_SERVER_AUTH_DEV_MODE=1` and `LOOM_SERVER_ENV=production`
+- **Missing secrets**: Fails if required API keys are not provided
+- **Invalid paths**: Warns if paths don't exist or aren't writable
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Server Setup" icon="server" href="/deployment/server-setup">
+    Deploy loom-server
+  </Card>
+  <Card title="Database Migrations" icon="database" href="/deployment/database">
+    Manage schema changes
+  </Card>
+</CardGroup>

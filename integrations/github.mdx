@@ -1,0 +1,499 @@
+---
+title: "GitHub Integration"
+description: "Connect Loom with GitHub for code search, repository analysis, and OAuth authentication"
+---
+
+Loom integrates with GitHub at multiple levels: OAuth authentication for user login, GitHub App for repository access, and API clients for code search and introspection.
+
+## GitHub OAuth Authentication
+
+Use GitHub OAuth to authenticate users with their GitHub accounts.
+
+### Setup
+
+<Steps>
+  <Step title="Create OAuth App">
+    Register an OAuth application in your [GitHub Developer Settings](https://github.com/settings/developers):
+    
+    - **Application name:** Loom (or your deployment name)
+    - **Homepage URL:** `https://your-domain.com`
+    - **Authorization callback URL:** `https://your-domain.com/auth/github/callback`
+  </Step>
+  
+  <Step title="Configure Environment">
+    ```bash
+    LOOM_SERVER_GITHUB_CLIENT_ID=Iv1.abc123def456
+    LOOM_SERVER_GITHUB_CLIENT_SECRET=abc123...
+    LOOM_SERVER_GITHUB_REDIRECT_URI=https://your-domain.com/auth/github/callback
+    ```
+  </Step>
+  
+  <Step title="Initialize Client">
+    ```rust
+    use loom_server_auth_github::{GitHubOAuthClient, GitHubOAuthConfig};
+    
+    let config = GitHubOAuthConfig::from_env()?;
+    let client = GitHubOAuthClient::new(config);
+    ```
+  </Step>
+</Steps>
+
+### OAuth Flow
+
+<Tabs>
+  <Tab title="Authorization">
+    Generate the authorization URL and redirect the user:
+    
+    ```rust
+    // loom-server-auth-github/src/lib.rs:355
+    let state = generate_random_state();  // CSRF protection
+    let auth_url = client.authorization_url(&state);
+    
+    // Redirect user to auth_url
+    // Store state server-side for validation
+    ```
+    
+    **URL format:**
+    ```
+    https://github.com/login/oauth/authorize
+      ?client_id=Iv1.abc123def456
+      &redirect_uri=https://your-domain.com/auth/github/callback
+      &scope=user:email+read:user
+      &state=random-csrf-token
+    ```
+  </Tab>
+  
+  <Tab title="Callback">
+    Handle the OAuth callback and exchange code for token:
+    
+    ```rust
+    // Verify state parameter (CSRF protection)
+    if callback_state != stored_state {
+        return Err("Invalid state parameter");
+    }
+    
+    // Exchange code for access token
+    let token_response = client.exchange_code(&code).await?;
+    
+    // loom-server-auth-github/src/lib.rs:388
+    let response = self.http_client
+        .post(GITHUB_TOKEN_URL)
+        .header("Accept", "application/json")
+        .form(&[
+            ("client_id", self.config.client_id.as_str()),
+            ("client_secret", self.config.client_secret.expose().as_str()),
+            ("code", code),
+            ("redirect_uri", self.config.redirect_uri.as_str()),
+        ])
+        .send()
+        .await?
+    ```
+  </Tab>
+  
+  <Tab title="User Info">
+    Fetch user profile and email addresses:
+    
+    ```rust
+    // Get user profile
+    let user = client.get_user(token.access_token.expose()).await?;
+    println!("GitHub ID: {}", user.id);  // Stable identifier
+    println!("Username: {}", user.login);
+    println!("Name: {:?}", user.name);
+    
+    // Get all email addresses (including private)
+    let emails = client.get_emails(token.access_token.expose()).await?;
+    
+    // Find primary verified email
+    let primary_email = emails.iter()
+        .find(|e| e.primary && e.verified)
+        .map(|e| e.email.clone())
+        .ok_or("No verified email found")?;
+    ```
+    
+    **API calls:**
+    ```rust
+    // loom-server-auth-github/src/lib.rs:435
+    GET https://api.github.com/user
+    Headers:
+      Accept: application/vnd.github+json
+      Authorization: Bearer {token}
+      X-GitHub-Api-Version: 2022-11-28
+    
+    // loom-server-auth-github/src/lib.rs:480
+    GET https://api.github.com/user/emails
+    Headers: (same as above)
+    ```
+  </Tab>
+</Tabs>
+
+### Scopes
+
+**Default scopes:**
+- `user:email` - Read all email addresses (including private)
+- `read:user` - Read user profile information
+
+**Optional scopes:**
+```rust
+let config = GitHubOAuthConfig {
+    client_id: "...".to_string(),
+    client_secret: SecretString::new("..."),
+    redirect_uri: "...".to_string(),
+    scopes: vec![
+        "user:email".to_string(),
+        "read:user".to_string(),
+        "repo".to_string(),  // Access private repositories
+        "read:org".to_string(),  // Read organization membership
+    ],
+};
+```
+
+<Warning>
+  **Always use verified emails.** Only trust emails where `verified: true`. Unverified emails can be set by anyone and should not be used for authentication.
+</Warning>
+
+### Response Types
+
+```rust
+// User profile
+pub struct GitHubUser {
+    pub id: i64,              // Stable identifier (use this)
+    pub login: String,        // Username (can change)
+    pub name: Option<String>, // Display name
+    pub email: Option<String>,  // Public email (often null)
+    pub avatar_url: Option<String>,
+}
+
+// Email address
+pub struct GitHubEmail {
+    pub email: String,
+    pub primary: bool,    // User's primary email
+    pub verified: bool,   // Verified by GitHub
+}
+
+// Token response
+pub struct GitHubTokenResponse {
+    pub access_token: SecretString,  // Never logged
+    pub token_type: String,  // "bearer"
+    pub scope: String,       // Granted scopes
+}
+```
+
+## GitHub App Integration
+
+GitHub Apps provide fine-grained access to repositories with enhanced security and better rate limits than OAuth apps.
+
+### Setup
+
+<Steps>
+  <Step title="Create GitHub App">
+    Create a GitHub App in your organization or personal account:
+    
+    1. Go to **Settings → Developer settings → GitHub Apps → New GitHub App**
+    2. Configure:
+       - **Name:** Loom
+       - **Homepage URL:** `https://your-domain.com`
+       - **Webhook URL:** `https://your-domain.com/webhooks/github`
+       - **Webhook secret:** Generate a random secret
+    3. Set permissions:
+       - **Repository contents:** Read
+       - **Repository metadata:** Read
+       - **Issues:** Read & Write (if needed)
+    4. Download the private key (`.pem` file)
+  </Step>
+  
+  <Step title="Configure Application">
+    ```bash
+    LOOM_SERVER_GITHUB_APP_ID=123456
+    LOOM_SERVER_GITHUB_APP_PRIVATE_KEY_PATH=/path/to/private-key.pem
+    LOOM_SERVER_GITHUB_APP_WEBHOOK_SECRET=your-webhook-secret
+    ```
+    
+    Or provide the private key directly:
+    ```bash
+    LOOM_SERVER_GITHUB_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\n..."
+    ```
+  </Step>
+</Steps>
+
+### Authentication
+
+GitHub Apps use JWT-based authentication:
+
+```rust
+use loom_server_github_app::{GithubAppClient, GithubAppConfig};
+
+let config = GithubAppConfig::from_env()?;
+let client = GithubAppClient::new(config)?;
+
+// Get installation access token
+let installation_id = 12345678;  // From webhook or API
+let token = client.get_installation_token(installation_id).await?;
+
+// Use token for API requests (automatically refreshed)
+```
+
+**JWT generation:**
+```rust
+// loom-server-github-app/src/jwt.rs
+use jsonwebtoken::{encode, Header, EncodingKey, Algorithm};
+
+#[derive(Serialize)]
+struct Claims {
+    iat: i64,  // Issued at
+    exp: i64,  // Expires at (max 10 minutes)
+    iss: String,  // App ID
+}
+
+pub fn create_jwt(app_id: &str, private_key: &str) -> Result<String, JwtError> {
+    let now = Utc::now().timestamp();
+    let claims = Claims {
+        iat: now - 60,  // 60 seconds in the past (clock skew)
+        exp: now + 600,  // 10 minutes in the future
+        iss: app_id.to_string(),
+    };
+    
+    let header = Header::new(Algorithm::RS256);
+    let key = EncodingKey::from_rsa_pem(private_key.as_bytes())?;
+    
+    Ok(encode(&header, &claims, &key)?)
+}
+```
+
+### Code Search
+
+Search code across repositories the app has access to:
+
+```rust
+use loom_server_github_app::{CodeSearchRequest, CodeSearchResponse};
+
+let request = CodeSearchRequest {
+    query: "language:rust trait LlmClient".to_string(),
+    per_page: Some(30),
+    page: Some(1),
+};
+
+let response: CodeSearchResponse = client.search_code(&request, installation_id).await?;
+
+for item in response.items {
+    println!("File: {} in {}/{}",
+        item.name,
+        item.repository.full_name,
+        item.path
+    );
+    println!("  URL: {}", item.html_url);
+}
+```
+
+**Search query syntax:**
+```
+language:rust trait LlmClient
+repo:owner/repo filename:main.rs
+org:myorg path:src/ extension:rs
+user:username "async fn"
+```
+
+<Info>
+  See [GitHub Code Search Documentation](https://docs.github.com/en/search-github/searching-on-github/searching-code) for complete query syntax.
+</Info>
+
+### Repository Introspection
+
+Fetch repository metadata and file contents:
+
+```rust
+use loom_server_github_app::{RepoInfoRequest, FileContentsRequest};
+
+// Get repository info
+let repo = client.get_repository_info(
+    &RepoInfoRequest {
+        owner: "loom".to_string(),
+        repo: "loom".to_string(),
+    },
+    installation_id
+).await?;
+
+println!("Repo: {}", repo.full_name);
+println!("Description: {:?}", repo.description);
+println!("Stars: {}", repo.stargazers_count);
+println!("Language: {:?}", repo.language);
+println!("Default branch: {}", repo.default_branch);
+
+// Get file contents
+let file = client.get_file_contents(
+    &FileContentsRequest {
+        owner: "loom".to_string(),
+        repo: "loom".to_string(),
+        path: "README.md".to_string(),
+        reference: Some("main".to_string()),  // branch, tag, or commit SHA
+    },
+    installation_id
+).await?;
+
+let content = file.decode_content()?;  // Base64 decode
+println!("README.md:\n{}", content);
+```
+
+### Webhook Handling
+
+Verify and process GitHub webhooks:
+
+```rust
+use loom_server_github_app::verify_webhook_signature;
+
+// In your webhook handler
+async fn handle_webhook(
+    payload: Vec<u8>,
+    signature: &str,  // X-Hub-Signature-256 header
+    secret: &str,
+) -> Result<(), Error> {
+    // Verify signature
+    if !verify_webhook_signature(&payload, signature, secret) {
+        return Err(Error::InvalidSignature);
+    }
+    
+    // Parse payload
+    let event: serde_json::Value = serde_json::from_slice(&payload)?;
+    
+    // Handle event types
+    match event["action"].as_str() {
+        Some("created") => { /* Installation created */ }
+        Some("deleted") => { /* Installation deleted */ }
+        _ => {}
+    }
+    
+    Ok(())
+}
+```
+
+**Signature verification:**
+```rust
+// loom-server-github-app/src/webhook.rs
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+
+pub fn verify_webhook_signature(
+    payload: &[u8],
+    signature: &str,
+    secret: &str,
+) -> bool {
+    // GitHub sends "sha256=<hex>"
+    let expected = match signature.strip_prefix("sha256=") {
+        Some(sig) => sig,
+        None => return false,
+    };
+    
+    // Compute HMAC-SHA256
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
+        .expect("HMAC can take key of any size");
+    mac.update(payload);
+    
+    // Compare (constant-time)
+    let computed = hex::encode(mac.finalize().into_bytes());
+    computed == expected
+}
+```
+
+### Installation Management
+
+Track which repositories the app is installed on:
+
+```rust
+// List installations
+let installations = client.list_installations().await?;
+
+for install in installations {
+    println!("Installation ID: {}", install.id);
+    println!("  Account: {}", install.account.login);
+    println!("  Type: {:?}", install.account.account_type);
+    println!("  Repos: {:?}", install.repository_selection);
+}
+
+// Get installation status
+let status = client.get_installation_status(installation_id).await?;
+println!("Status: {}", status.status);  // "active" or "suspended"
+```
+
+## Rate Limiting
+
+GitHub enforces rate limits for API requests:
+
+**OAuth (per user):**
+- 5,000 requests/hour for authenticated requests
+- 60 requests/hour for unauthenticated requests
+
+**GitHub App (per installation):**
+- 15,000 requests/hour (3x higher than OAuth)
+- Shared across all users of the installation
+
+**Check rate limit:**
+```rust
+let response = client.get(...).await?;
+
+if let Some(remaining) = response.headers().get("x-ratelimit-remaining") {
+    println!("Remaining: {}", remaining.to_str()?);
+}
+
+if let Some(reset) = response.headers().get("x-ratelimit-reset") {
+    let timestamp = reset.to_str()?.parse::<i64>()?;
+    println!("Resets at: {}", timestamp);
+}
+```
+
+<Warning>
+  GitHub returns **403 Forbidden** when rate limited, not 429. Check the `X-RateLimit-Remaining` header proactively to avoid hitting limits.
+</Warning>
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Use GitHub Apps" icon="check">
+    Prefer GitHub Apps over OAuth Apps for repository access. They provide better rate limits, fine-grained permissions, and don't depend on individual user tokens.
+  </Card>
+  
+  <Card title="Cache Tokens" icon="database">
+    Installation tokens are valid for 1 hour. Cache them to avoid unnecessary JWT creation and token exchange calls.
+  </Card>
+  
+  <Card title="Verify Webhooks" icon="shield">
+    Always verify webhook signatures using HMAC-SHA256. Never trust unverified webhook payloads.
+  </Card>
+  
+  <Card title="Use Stable IDs" icon="fingerprint">
+    Use `user.id` (numeric) as the stable identifier, not `user.login` (can change). Store both for display purposes.
+  </Card>
+</CardGroup>
+
+## Error Handling
+
+```rust
+use loom_server_github_app::GithubAppError;
+
+match client.search_code(&request, installation_id).await {
+    Ok(results) => { /* ... */ }
+    Err(GithubAppError::RateLimitExceeded { reset_at }) => {
+        let wait = reset_at - Utc::now();
+        println!("Rate limited, retry in {} seconds", wait.num_seconds());
+    }
+    Err(GithubAppError::NotFound) => {
+        println!("Repository or installation not found");
+    }
+    Err(GithubAppError::Unauthorized) => {
+        println!("Invalid credentials or insufficient permissions");
+    }
+    Err(e) => {
+        println!("Error: {}", e);
+    }
+}
+```
+
+## API Reference
+
+See the source for complete type definitions:
+- **OAuth Client:** `crates/loom-server-auth-github/src/lib.rs`
+- **GitHub App Client:** `crates/loom-server-github-app/src/client.rs`
+- **Types:** `crates/loom-server-github-app/src/types.rs`
+- **Webhook Verification:** `crates/loom-server-github-app/src/webhook.rs`
+
+<Info>
+  GitHub API documentation: [https://docs.github.com/en/rest](https://docs.github.com/en/rest)
+</Info>

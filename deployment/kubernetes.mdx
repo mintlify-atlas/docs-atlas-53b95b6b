@@ -1,0 +1,420 @@
+---
+title: Kubernetes Deployment
+description: Deploy weavers on Kubernetes for remote code execution environments
+---
+
+## Overview
+
+Weavers are ephemeral Kubernetes pods that provide isolated execution environments for Loom agents. Each weaver runs a containerized instance of the Loom CLI with network isolation, resource limits, and audit logging.
+
+<Note>
+Loom uses k3s (lightweight Kubernetes) for weaver provisioning. The server communicates with the k3s API to create, manage, and cleanup weaver pods.
+</Note>
+
+## Architecture
+
+```
+┌─────────────────┐
+│  loom-server    │
+│                 │
+│  Provisioner    │───────┐
+└─────────────────┘       │
+                          │ kubectl API
+                          ▼
+                ┌──────────────────┐
+                │   k3s cluster    │
+                │                  │
+                │  ┌────────────┐  │
+                │  │ Weaver Pod │  │  Namespace: loom-weavers
+                │  │            │  │
+                │  │ ┌────────┐ │  │
+                │  │ │ CLI    │ │  │  Image: ghcr.io/user/weaver:latest
+                │  │ └────────┘ │  │
+                │  │ ┌────────┐ │  │
+                │  │ │ Audit  │ │  │  Sidecar: eBPF monitoring
+                │  │ └────────┘ │  │
+                │  └────────────┘  │
+                └──────────────────┘
+```
+
+## k3s Installation
+
+Loom uses k3s for Kubernetes. The NixOS module handles installation and configuration.
+
+### NixOS Configuration
+
+```nix configuration.nix
+services.loom-k3s = {
+  enable = true;
+  role = "server";  # "server" or "agent"
+  clusterInit = true;  # true for first server
+  
+  # Disable built-in components (we use custom ingress)
+  disableTraefik = true;
+  disableServiceLB = false;
+  disableLocalStorage = false;
+  
+  # Bind to localhost only (security)
+  bindAddress = "127.0.0.1";
+  
+  # kubeconfig location
+  kubeconfigPath = "/etc/rancher/k3s/k3s.yaml";
+};
+```
+
+### Namespace Setup
+
+The k3s module automatically creates the `loom-weavers` namespace:
+
+```bash
+kubectl get namespace loom-weavers
+```
+
+If you need to create it manually:
+
+```bash
+kubectl create namespace loom-weavers
+```
+
+### Image Pull Secrets
+
+For private container registries (e.g., GitHub Container Registry):
+
+<Steps>
+  <Step title="Generate a GitHub Personal Access Token">
+    1. Go to GitHub Settings → Developer settings → Personal access tokens
+    2. Create a token with `read:packages` scope
+    3. Save the token to a file: `/run/secrets/github-token`
+  </Step>
+
+  <Step title="Enable ghcr.io secret in NixOS">
+    ```nix configuration.nix
+    services.loom-k3s.ghcrSecret = {
+      enable = true;
+      username = "ghuntley";
+      tokenFile = "/run/secrets/github-token";
+    };
+    ```
+  </Step>
+
+  <Step title="Verify the secret exists">
+    ```bash
+    kubectl get secret ghcr-secret -n loom-weavers
+    ```
+  </Step>
+</Steps>
+
+Or create manually:
+
+```bash
+kubectl create secret docker-registry ghcr-secret \
+  --namespace=loom-weavers \
+  --docker-server=ghcr.io \
+  --docker-username=ghuntley \
+  --docker-password=ghp_xxxxxxxxxxxx
+```
+
+## Weaver Configuration
+
+Configure the weaver provisioner in loom-server:
+
+```nix configuration.nix
+services.loom-server.weaver = {
+  enable = true;
+  
+  # Kubernetes namespace for weavers
+  namespace = "loom-weavers";
+  
+  # Path to kubeconfig (k3s default)
+  kubeconfigPath = "/etc/rancher/k3s/k3s.yaml";
+  
+  # Cleanup interval for expired weavers
+  cleanupIntervalSecs = 1800;  # 30 minutes
+  
+  # Weaver TTL limits
+  defaultTtlHours = 4;
+  maxTtlHours = 48;
+  
+  # Concurrency limits
+  maxConcurrent = 64;
+  
+  # Pod readiness timeout
+  readyTimeoutSecs = 60;
+  
+  # Image pull secrets for private registries
+  imagePullSecrets = [ "ghcr-secret" ];
+  
+  # Audit sidecar for eBPF monitoring
+  audit = {
+    enable = true;
+    image = "ghcr.io/ghuntley/loom-audit-sidecar:latest";
+    batchIntervalMs = 100;
+    bufferMaxBytes = 268435456;  # 256 MB
+    metricsPort = 9090;
+    healthPort = 9091;
+  };
+};
+```
+
+### Environment Variables
+
+Alternatively, configure via environment variables:
+
+```bash
+export LOOM_SERVER_WEAVER_ENABLED=true
+export LOOM_SERVER_WEAVER_K8S_NAMESPACE=loom-weavers
+export LOOM_SERVER_WEAVER_CLEANUP_INTERVAL_SECS=1800
+export LOOM_SERVER_WEAVER_DEFAULT_TTL_HOURS=4
+export LOOM_SERVER_WEAVER_MAX_TTL_HOURS=48
+export LOOM_SERVER_WEAVER_MAX_CONCURRENT=64
+export LOOM_SERVER_WEAVER_READY_TIMEOUT_SECS=60
+export LOOM_SERVER_WEAVER_IMAGE_PULL_SECRETS=ghcr-secret
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+```
+
+## Weaver Images
+
+Weavers run container images with the Loom CLI pre-installed.
+
+### Building a Weaver Image
+
+Use the provided Dockerfile:
+
+```dockerfile docker/Dockerfile.weaver
+FROM rust:1.83-slim-bookworm AS rust-builder
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+
+RUN cargo build --release --package loom-cli
+
+# Runtime image
+FROM debian:bookworm-slim AS runtime
+
+WORKDIR /workspace
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    git \
+    curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -m -u 1000 loom
+
+COPY --from=rust-builder /app/target/release/loom /usr/local/bin/loom
+COPY docker/weaver-entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+USER loom
+
+ENTRYPOINT ["/entrypoint.sh"]
+```
+
+### Building with Nix
+
+```bash
+nix build .#weaver-image
+docker load < result
+```
+
+### Pushing to Registry
+
+```bash
+# Build
+docker build -f docker/Dockerfile.weaver -t ghcr.io/your-org/weaver:latest .
+
+# Login to GHCR
+echo $GITHUB_TOKEN | docker login ghcr.io -u your-username --password-stdin
+
+# Push
+docker push ghcr.io/your-org/weaver:latest
+```
+
+## Managing Weavers
+
+### CLI Commands
+
+<CodeGroup>
+```bash List weavers
+loom --server-url https://loom.example.com weaver ps
+```
+
+```bash Create a weaver
+loom --server-url https://loom.example.com new --image ghcr.io/your-org/weaver:latest
+```
+
+```bash Attach to weaver
+loom --server-url https://loom.example.com attach <weaver-id>
+```
+
+```bash Delete weaver
+loom --server-url https://loom.example.com weaver delete <weaver-id>
+```
+</CodeGroup>
+
+### Kubernetes Commands
+
+<CodeGroup>
+```bash List pods
+sudo kubectl get pods -n loom-weavers
+```
+
+```bash Describe pod
+sudo kubectl describe pod <pod-name> -n loom-weavers
+```
+
+```bash View logs
+sudo kubectl logs <pod-name> -n loom-weavers
+```
+
+```bash Delete stuck pod
+sudo kubectl delete pod <pod-name> -n loom-weavers
+```
+
+```bash Shell into pod
+sudo kubectl exec -it <pod-name> -n loom-weavers -- /bin/bash
+```
+</CodeGroup>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="ErrImagePull - Image not found">
+    The container image doesn't exist or is private.
+
+    **Check:**
+    1. Verify image exists: `docker pull ghcr.io/your-org/weaver:latest`
+    2. Check image pull secret: `kubectl get secret ghcr-secret -n loom-weavers`
+    3. Verify secret is configured in weaver settings
+
+    **Fix:**
+    ```bash
+    # Recreate the secret
+    kubectl delete secret ghcr-secret -n loom-weavers
+    kubectl create secret docker-registry ghcr-secret \
+      --namespace=loom-weavers \
+      --docker-server=ghcr.io \
+      --docker-username=your-username \
+      --docker-password=$GITHUB_TOKEN
+    ```
+  </Accordion>
+
+  <Accordion title="Pod immediately exits (Succeeded status)">
+    The container has no long-running entrypoint.
+
+    **Weaver images must run a persistent process.** The default entrypoint script keeps the container alive:
+
+    ```bash weaver-entrypoint.sh
+    #!/bin/bash
+    set -e
+    
+    # Start loom REPL
+    exec loom repl --server-url $LOOM_SERVER_URL
+    ```
+
+    Verify your entrypoint doesn't exit immediately.
+  </Accordion>
+
+  <Accordion title="401 Unauthorized when creating weavers">
+    You need to authenticate first:
+
+    ```bash
+    loom --server-url https://loom.example.com login
+    ```
+
+    This creates a session token in `~/.loom/credentials.json`.
+  </Accordion>
+
+  <Accordion title="Namespace not found">
+    The `loom-weavers` namespace doesn't exist.
+
+    **Create it:**
+    ```bash
+    kubectl create namespace loom-weavers
+    ```
+
+    Or wait for the NixOS service to create it (runs after k3s starts).
+  </Accordion>
+
+  <Accordion title="Permission denied accessing kubeconfig">
+    The loom-server user needs read access to `/etc/rancher/k3s/k3s.yaml`.
+
+    **Fix permissions:**
+    ```bash
+    sudo chmod 640 /etc/rancher/k3s/k3s.yaml
+    sudo chown root:loom-server /etc/rancher/k3s/k3s.yaml
+    ```
+
+    The NixOS module handles this automatically via the `loom-k3s` group.
+  </Accordion>
+</AccordionGroup>
+
+## Audit Sidecar
+
+Weavers include an optional eBPF audit sidecar for monitoring system calls, network activity, and file access.
+
+### Configuration
+
+```nix configuration.nix
+services.loom-server.weaver.audit = {
+  enable = true;
+  image = "ghcr.io/ghuntley/loom-audit-sidecar:latest";
+  batchIntervalMs = 100;        # Event batching interval
+  bufferMaxBytes = 268435456;   # 256 MB buffer
+  metricsPort = 9090;           # Prometheus metrics
+  healthPort = 9091;            # Health check endpoint
+};
+```
+
+### Viewing Audit Logs
+
+```bash
+# View audit sidecar logs
+kubectl logs <pod-name> -c audit-sidecar -n loom-weavers
+
+# Metrics endpoint
+kubectl port-forward <pod-name> 9090:9090 -n loom-weavers
+curl http://localhost:9090/metrics
+```
+
+## Resource Limits
+
+Set resource limits on weaver pods:
+
+```yaml
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: weaver-quota
+  namespace: loom-weavers
+spec:
+  hard:
+    requests.cpu: "32"
+    requests.memory: 64Gi
+    limits.cpu: "64"
+    limits.memory: 128Gi
+    pods: "64"
+```
+
+Apply with:
+
+```bash
+kubectl apply -f weaver-quota.yaml
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Server Configuration" icon="gear" href="/deployment/configuration">
+    Complete environment variable reference
+  </Card>
+  <Card title="Database Migrations" icon="database" href="/deployment/database">
+    Manage SQLite schema changes
+  </Card>
+</CardGroup>

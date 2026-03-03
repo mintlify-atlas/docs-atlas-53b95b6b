@@ -1,0 +1,509 @@
+---
+title: Database & Migrations
+description: SQLite database management and schema migrations for loom-server
+---
+
+## Overview
+
+Loom uses SQLite with Write-Ahead Logging (WAL) for thread persistence, authentication, analytics, and feature flags. The database is designed for multi-reader, single-writer workloads.
+
+<Note>
+Database migrations run automatically on server startup. You do not need to run migrations manually.
+</Note>
+
+## Database Location
+
+The database path is configured via:
+
+```bash
+export LOOM_SERVER_DATABASE_URL=sqlite:/var/lib/loom-server/loom.db?mode=rwc
+```
+
+Or in NixOS:
+
+```nix
+services.loom-server.databasePath = "/var/lib/loom-server/loom.db";
+```
+
+### SQLite Configuration
+
+Loom uses these SQLite settings:
+
+- **Journal mode**: WAL (Write-Ahead Logging) for better concurrency
+- **Synchronous**: NORMAL (balance between safety and performance)
+- **Foreign keys**: Enabled
+- **Auto vacuum**: Incremental
+
+## Schema Organization
+
+The database schema is organized into these domains:
+
+<CardGroup cols={3}>
+  <Card title="Threads" icon="comments">
+    Conversation persistence and FTS search
+  </Card>
+  <Card title="Authentication" icon="lock">
+    Users, organizations, teams, sessions, API keys
+  </Card>
+  <Card title="SCM" icon="code-branch">
+    Git repositories, commits, webhooks, mirrors
+  </Card>
+  <Card title="Analytics" icon="chart-line">
+    Events, sessions, crash reports, cron monitoring
+  </Card>
+  <Card title="Feature Flags" icon="flag">
+    Flags, experiments, exposures
+  </Card>
+  <Card title="Secrets" icon="key">
+    Weaver secrets with encryption-at-rest
+  </Card>
+</CardGroup>
+
+## Migration System
+
+Migrations are numbered SQL files in `crates/loom-server/migrations/`:
+
+```
+migrations/
+├── 001_create_threads.sql
+├── 002_add_visibility.sql
+├── 003_add_git_metadata.sql
+├── ...
+└── 040_whatsapp.sql
+```
+
+### Migration Naming Convention
+
+```
+NNN_description.sql
+```
+
+- `NNN`: Three-digit sequence number (001, 002, ...)
+- `description`: Short snake_case description
+
+Examples:
+- `020_scm_repos.sql`
+- `030_feature_flags.sql`
+- `032_analytics.sql`
+
+### How Migrations Run
+
+Migrations are embedded in the binary via `include_str!()` and executed sequentially on startup:
+
+```rust crates/loom-server/src/db/mod.rs
+pub async fn run_migrations(pool: &SqlitePool) -> Result<(), ServerError> {
+    let m1 = include_str!("../../migrations/001_create_threads.sql");
+    sqlx::query(m1).execute(pool).await?;
+    
+    let m2 = include_str!("../../migrations/002_add_visibility.sql");
+    if let Err(e) = sqlx::query(m2).execute(pool).await {
+        // Handle duplicate column errors (idempotency)
+        ...
+    }
+    
+    // ... more migrations
+}
+```
+
+<Warning>
+**cargo2nix doesn't track `include_str!()` file changes.** After adding migrations:
+
+1. Run `cargo2nix-update` to regenerate `Cargo.nix`
+2. Commit `Cargo.nix` along with your migration files
+3. Without this step, the deployed binary will NOT include the new migration!
+</Warning>
+
+## Adding a Migration
+
+<Steps>
+  <Step title="Find the next migration number">
+    ```bash
+    ls crates/loom-server/migrations/ | tail -1
+    # 040_whatsapp.sql
+    # Next number: 041
+    ```
+  </Step>
+
+  <Step title="Create the migration file">
+    ```bash
+    touch crates/loom-server/migrations/041_my_feature.sql
+    ```
+  </Step>
+
+  <Step title="Write the migration SQL">
+    ```sql 041_my_feature.sql
+    -- Copyright (c) 2025 Geoffrey Huntley <ghuntley@ghuntley.com>. All rights reserved.
+    -- SPDX-License-Identifier: Proprietary
+
+    -- Add my_feature table
+    CREATE TABLE IF NOT EXISTS my_feature (
+        id TEXT PRIMARY KEY NOT NULL,
+        name TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_my_feature_name
+        ON my_feature(name);
+    ```
+
+    <Tip>
+    Always use `IF NOT EXISTS` and `IF NOT EXISTS` for idempotency. Migrations may be run multiple times.
+    </Tip>
+  </Step>
+
+  <Step title="Add the migration to db/mod.rs">
+    ```rust crates/loom-server/src/db/mod.rs
+    let m41 = include_str!("../../migrations/041_my_feature.sql");
+    for stmt in m41.split(';').filter(|s| !s.trim().is_empty()) {
+        if let Err(e) = sqlx::query(stmt).execute(pool).await {
+            let msg = e.to_string();
+            if !msg.contains("already exists") && !msg.contains("duplicate column") {
+                return Err(e.into());
+            }
+        }
+    }
+    ```
+  </Step>
+
+  <Step title="Test the migration">
+    ```bash
+    # Delete test database
+    rm -f /tmp/loom-test.db
+    
+    # Run server (migrations run on startup)
+    cargo run -p loom-server -- \
+      LOOM_SERVER_DATABASE_URL=sqlite:/tmp/loom-test.db \
+      LOOM_SERVER_ANTHROPIC_API_KEY=sk-test
+    
+    # Verify tables exist
+    sqlite3 /tmp/loom-test.db ".tables"
+    ```
+  </Step>
+
+  <Step title="Force rebuild for cargo2nix">
+    ```bash
+    cargo2nix-update
+    git add Cargo.nix crates/loom-server/migrations/041_my_feature.sql
+    git commit -m "Add my_feature migration"
+    ```
+  </Step>
+</Steps>
+
+## Migration Examples
+
+### Simple Table Creation
+
+```sql 020_scm_repos.sql
+CREATE TABLE IF NOT EXISTS scm_repos (
+    id TEXT PRIMARY KEY NOT NULL,
+    org_id TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    clone_url TEXT NOT NULL,
+    local_path TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    last_fetched_at TEXT,
+    FOREIGN KEY (org_id) REFERENCES orgs(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_scm_repos_org_id
+    ON scm_repos(org_id);
+
+CREATE INDEX IF NOT EXISTS idx_scm_repos_provider
+    ON scm_repos(provider);
+```
+
+### Full-Text Search (FTS5)
+
+```sql 005_thread_fts.sql
+CREATE VIRTUAL TABLE IF NOT EXISTS thread_fts USING fts5(
+    thread_id UNINDEXED,
+    title,
+    content,
+    tokenize = 'porter unicode61'
+);
+
+CREATE TRIGGER IF NOT EXISTS thread_fts_insert
+AFTER INSERT ON threads
+BEGIN
+    INSERT INTO thread_fts(thread_id, title, content)
+    VALUES (NEW.id, NEW.title, json_extract(NEW.full_json, '$.conversation'));
+END;
+
+CREATE TRIGGER IF NOT EXISTS thread_fts_update
+AFTER UPDATE ON threads
+BEGIN
+    DELETE FROM thread_fts WHERE thread_id = OLD.id;
+    INSERT INTO thread_fts(thread_id, title, content)
+    VALUES (NEW.id, NEW.title, json_extract(NEW.full_json, '$.conversation'));
+END;
+
+CREATE TRIGGER IF NOT EXISTS thread_fts_delete
+AFTER DELETE ON threads
+BEGIN
+    DELETE FROM thread_fts WHERE thread_id = OLD.id;
+END;
+```
+
+### JSON Columns
+
+```sql 030_feature_flags.sql
+CREATE TABLE IF NOT EXISTS flags (
+    id TEXT PRIMARY KEY NOT NULL,
+    key TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    description TEXT,
+    
+    -- JSON column for conditions
+    conditions JSON,
+    
+    -- JSON column for variants
+    variants JSON NOT NULL,
+    
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+-- Query JSON columns
+SELECT key, json_extract(variants, '$.control.value') as control_value
+FROM flags
+WHERE json_extract(conditions, '$.enabled') = 1;
+```
+
+### Adding Columns to Existing Tables
+
+```sql 023_add_username.sql
+-- Add username column (nullable first, then backfill)
+ALTER TABLE users ADD COLUMN username TEXT;
+
+-- Create unique index
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username
+    ON users(username)
+    WHERE username IS NOT NULL;
+```
+
+## Schema Inspection
+
+### List All Tables
+
+```bash
+sqlite3 /var/lib/loom-server/loom.db ".tables"
+```
+
+### Show Table Schema
+
+```bash
+sqlite3 /var/lib/loom-server/loom.db ".schema threads"
+```
+
+### Show Indexes
+
+```bash
+sqlite3 /var/lib/loom-server/loom.db ".indexes threads"
+```
+
+### Query Metadata
+
+```sql
+-- Show all tables
+SELECT name FROM sqlite_master WHERE type='table';
+
+-- Show all indexes
+SELECT name, tbl_name FROM sqlite_master WHERE type='index';
+
+-- Show FTS tables
+SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%_fts';
+
+-- Show triggers
+SELECT name, tbl_name FROM sqlite_master WHERE type='trigger';
+```
+
+## Database Backup
+
+### Manual Backup
+
+```bash
+# Stop the server first
+sudo systemctl stop loom-server
+
+# Copy database file
+cp /var/lib/loom-server/loom.db /backup/loom-$(date +%Y%m%d).db
+
+# Copy WAL files too (if they exist)
+cp /var/lib/loom-server/loom.db-shm /backup/
+cp /var/lib/loom-server/loom.db-wal /backup/
+
+# Restart server
+sudo systemctl start loom-server
+```
+
+### Online Backup
+
+```bash
+# Use SQLite's backup API (doesn't require stopping server)
+sqlite3 /var/lib/loom-server/loom.db ".backup /backup/loom-$(date +%Y%m%d).db"
+```
+
+### Automated Backups
+
+```nix backup-service.nix
+systemd.services.loom-backup = {
+  description = "Backup Loom database";
+  serviceConfig = {
+    Type = "oneshot";
+    ExecStart = ''
+      ${pkgs.sqlite}/bin/sqlite3 /var/lib/loom-server/loom.db \
+        ".backup /backup/loom-$(date +%Y%m%d).db"
+    '';
+  };
+};
+
+systemd.timers.loom-backup = {
+  wantedBy = [ "timers.target" ];
+  timerConfig = {
+    OnCalendar = "daily";
+    Persistent = true;
+  };
+};
+```
+
+## Database Maintenance
+
+### Vacuum
+
+Reclaim space and defragment:
+
+```bash
+sqlite3 /var/lib/loom-server/loom.db "VACUUM;"
+```
+
+### Analyze
+
+Update query optimizer statistics:
+
+```bash
+sqlite3 /var/lib/loom-server/loom.db "ANALYZE;"
+```
+
+### Check Integrity
+
+```bash
+sqlite3 /var/lib/loom-server/loom.db "PRAGMA integrity_check;"
+```
+
+### Optimize
+
+```bash
+sqlite3 /var/lib/loom-server/loom.db "PRAGMA optimize;"
+```
+
+## Monitoring
+
+### Database Size
+
+```bash
+du -h /var/lib/loom-server/loom.db*
+```
+
+### Table Sizes
+
+```sql
+SELECT 
+    name,
+    (SELECT COUNT(*) FROM sqlite_master WHERE tbl_name = m.name) as objects,
+    pgsize
+FROM dbstat m
+GROUP BY name
+ORDER BY pgsize DESC;
+```
+
+### WAL Status
+
+```sql
+PRAGMA wal_checkpoint(PASSIVE);
+```
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Migration fails with 'duplicate column' error">
+    This is expected behavior for idempotent migrations. The error is caught and ignored:
+
+    ```rust
+    if let Err(e) = sqlx::query(m2).execute(pool).await {
+        let msg = e.to_string();
+        if !msg.contains("duplicate column") {
+            return Err(e.into());
+        }
+    }
+    ```
+
+    If a different error occurs, check the migration SQL syntax.
+  </Accordion>
+
+  <Accordion title="Database locked errors">
+    SQLite uses WAL mode for better concurrency, but you may still see lock errors with many concurrent writes.
+
+    **Fix:**
+    1. Ensure only one writer process (loom-server)
+    2. Close SQLite CLI sessions before starting the server
+    3. Check for stale lock files: `rm -f /var/lib/loom-server/*.db-shm`
+  </Accordion>
+
+  <Accordion title="New migration not included in deployed binary">
+    cargo2nix doesn't track `include_str!()` file changes.
+
+    **Fix:**
+    ```bash
+    cargo2nix-update
+    git add Cargo.nix
+    git commit -m "Update Cargo.nix for new migration"
+    git push origin trunk
+    ```
+  </Accordion>
+
+  <Accordion title="FTS search not working">
+    Check that FTS triggers are installed:
+
+    ```sql
+    SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='threads';
+    ```
+
+    Rebuild FTS index:
+
+    ```sql
+    DELETE FROM thread_fts;
+    INSERT INTO thread_fts(thread_id, title, content)
+    SELECT id, title, json_extract(full_json, '$.conversation')
+    FROM threads;
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Current Schema (as of migration 040)
+
+The database includes 40+ tables:
+
+- **Threads**: `threads`, `thread_fts`, `thread_repos`, `thread_commits`
+- **Auth**: `users`, `orgs`, `teams`, `sessions`, `api_keys`, `impersonation_sessions`
+- **SCM**: `scm_repos`, `scm_webhooks`, `scm_mirrors`, `scm_maintenance_log`
+- **GitHub**: `github_installations`, `github_installation_repos`
+- **Analytics**: `analytics_events`, `analytics_user_aliases`, `sessions`, `session_aggregates`
+- **Crashes**: `crash_events`, `crash_api_keys`, `crash_symbol_artifacts`
+- **Feature Flags**: `flags`, `flag_exposures`
+- **Crons**: `cron_monitors`, `cron_checkins`
+- **Jobs**: `job_runs`
+- **Secrets**: `weaver_secrets`
+- **WhatsApp**: `whatsapp_orgs`, `whatsapp_inbound_messages`
+- **Misc**: `cse_cache`, `ws_tokens`, `docs_fts`, `wgtunnel_tunnels`, `clips`, `clip_stars`
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Server Setup" icon="server" href="/deployment/server-setup">
+    Deploy loom-server
+  </Card>
+  <Card title="Configuration" icon="gear" href="/deployment/configuration">
+    Environment variables reference
+  </Card>
+</CardGroup>

@@ -1,0 +1,207 @@
+---
+title: HTTP API Overview
+description: Introduction to the Loom HTTP API for building integrations and custom clients
+---
+
+## Introduction
+
+The Loom HTTP API provides programmatic access to the Loom platform, enabling you to build custom integrations, automate workflows, and create alternative clients for the AI-powered coding agent.
+
+## Base URL
+
+All API requests are made to:
+
+```
+https://loom.ghuntley.com
+```
+
+For self-hosted deployments, replace with your instance URL.
+
+## Authentication
+
+The Loom API supports multiple authentication methods:
+
+### Session Cookies
+
+Web clients authenticate using HttpOnly session cookies set after OAuth or magic link login. The cookie name is configurable (default: `loom_session`).
+
+### API Keys
+
+For programmatic access, use API keys with the `Authorization` header:
+
+```bash
+curl -H "Authorization: Bearer loom_sk_..." \
+  https://loom.ghuntley.com/api/threads
+```
+
+API keys can be created via the dashboard or API and support scoped permissions.
+
+### WebSocket Tokens
+
+For WebSocket connections, obtain a short-lived token from `/auth/ws-token` (expires in 30 seconds, single-use):
+
+```bash
+curl -H "Cookie: loom_session=..." \
+  https://loom.ghuntley.com/auth/ws-token
+```
+
+Send the token in the WebSocket first message:
+
+```json
+{"type": "auth", "token": "ws_..."}
+```
+
+## Request Format
+
+All POST/PUT requests accept JSON payloads with `Content-Type: application/json`:
+
+```bash
+curl -X POST https://loom.ghuntley.com/api/threads/abc123 \
+  -H "Authorization: Bearer loom_sk_..." \
+  -H "Content-Type: application/json" \
+  -d '{"id": "abc123", "title": "My Thread", ...}'
+```
+
+## Response Format
+
+All responses return JSON with appropriate HTTP status codes:
+
+### Success Response (200 OK)
+
+```json
+{
+  "id": "thread_abc123",
+  "title": "Example Thread",
+  "created_at": "2026-03-03T12:00:00Z"
+}
+```
+
+### Error Response (4xx/5xx)
+
+```json
+{
+  "error": "not_found",
+  "message": "Thread not found",
+  "server_version": "1.0.0",
+  "client_version": null
+}
+```
+
+## Pagination
+
+List endpoints support offset-based pagination:
+
+<ParamField query="limit" type="integer" default="50">
+  Maximum number of results to return
+</ParamField>
+
+<ParamField query="offset" type="integer" default="0">
+  Number of results to skip
+</ParamField>
+
+Example:
+
+```bash
+curl "https://loom.ghuntley.com/api/threads?limit=20&offset=40"
+```
+
+Response includes pagination metadata:
+
+```json
+{
+  "threads": [...],
+  "total": 127,
+  "limit": 20,
+  "offset": 40
+}
+```
+
+## Optimistic Concurrency
+
+Thread operations support optimistic locking via the `If-Match` header:
+
+```bash
+curl -X PUT https://loom.ghuntley.com/api/threads/abc123 \
+  -H "If-Match: 42" \
+  -H "Content-Type: application/json" \
+  -d '{"id": "abc123", "version": 42, ...}'
+```
+
+If the version doesn't match, the API returns `409 Conflict`:
+
+```json
+{
+  "error": "version_conflict",
+  "message": "Expected version 42, but current version is 43"
+}
+```
+
+## Rate Limiting
+
+LLM proxy endpoints may return `503 Service Unavailable` with retry information:
+
+```json
+{
+  "error": "rate_limited",
+  "message": "LLM rate limited; retry after 30 seconds"
+}
+```
+
+## Server-Sent Events (SSE)
+
+Streaming endpoints use SSE with `event: llm` headers:
+
+```bash
+curl -N https://loom.ghuntley.com/proxy/anthropic/stream \
+  -H "Content-Type: application/json" \
+  -d '{"model": "claude-sonnet-4", "messages": [...]}'
+```
+
+Events:
+
+```
+event: llm
+data: {"type":"text_delta","content":"Hello"}
+
+event: llm
+data: {"type":"completed","response":{...}}
+```
+
+## WebSocket Connections
+
+Real-time communication uses WebSocket endpoints:
+
+- **Terminal attach**: `wss://loom.ghuntley.com/api/weaver/{id}/attach`
+- **Session streaming**: `wss://loom.ghuntley.com/api/ws/sessions/{id}`
+
+Authenticate via first message using a WebSocket token from `/auth/ws-token`.
+
+## Status Codes
+
+| Code | Meaning | Description |
+|------|---------|-------------|
+| 200 | OK | Request succeeded |
+| 201 | Created | Resource created successfully |
+| 204 | No Content | Resource deleted successfully |
+| 400 | Bad Request | Invalid request parameters |
+| 401 | Unauthorized | Authentication required |
+| 403 | Forbidden | Insufficient permissions |
+| 404 | Not Found | Resource does not exist |
+| 409 | Conflict | Version mismatch (optimistic locking) |
+| 500 | Internal Server Error | Server-side error |
+| 503 | Service Unavailable | Upstream service unavailable |
+
+## SDKs and Libraries
+
+Official SDKs:
+
+- **Rust**: `loom-common-core` (built-in)
+- **TypeScript**: `@loom/client` (web/Node.js)
+- **VS Code Extension**: Uses TypeScript client
+
+## Next Steps
+
+- [Authentication Endpoints](/api/authentication) - OAuth, magic links, and device code flow
+- [Thread Endpoints](/api/threads) - Manage conversation threads
+- [Weaver Endpoints](/api/weavers) - Provision ephemeral compute environments
+- [LLM Proxy Endpoints](/api/llm-proxy) - Server-side LLM completions

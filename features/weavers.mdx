@@ -1,0 +1,553 @@
+---
+title: "Weavers"
+description: "Ephemeral remote execution environments powered by Kubernetes for isolated AI coding sessions"
+---
+
+# Weavers
+
+Weavers are ephemeral, container-based execution environments that run Loom CLI sessions in isolated Kubernetes pods. They enable:
+
+- **Remote Development**: Code from anywhere without local setup
+- **Clean Environments**: Fresh container per session with custom images
+- **Resource Isolation**: CPU/memory limits per weaver
+- **Automatic Cleanup**: TTL-based lifecycle management
+- **Git Integration**: Clone repositories on creation
+
+## Architecture
+
+```
+┌──────────────┐
+│   loom CLI   │
+└──────┬───────┘
+       │ API
+       ▼
+┌──────────────┐     ┌─────────────────┐
+│ loom-server  │────▶│  Kubernetes     │
+└──────────────┘     │  ┌───────────┐  │
+                     │  │  Weaver   │  │
+                     │  │  Pod      │  │
+                     │  └───────────┘  │
+                     └─────────────────┘
+```
+
+**Components:**
+- `loom-cli`: User-facing commands (`new`, `attach`, `ps`, `delete`)
+- `loom-server-weaver`: Provisioning logic and cleanup
+- `loom-server-k8s`: Kubernetes client wrapper
+- Kubernetes: Pod orchestration and lifecycle
+
+## Quick Start
+
+<Steps>
+  <Step title="Authenticate">
+    ```bash
+    loom login --server-url https://loom.ghuntley.com
+    ```
+  </Step>
+
+  <Step title="Create a weaver">
+    ```bash
+    loom new --image ghcr.io/ghuntley/loom/weaver:latest
+    ```
+    
+    This:
+    - Creates a Kubernetes pod
+    - Waits for pod to be ready
+    - Attaches to the weaver terminal
+  </Step>
+
+  <Step title="Work in the weaver">
+    You now have an interactive Loom REPL running in the container.
+    
+    ```
+    > Clone this repo: https://github.com/user/project
+    ```
+  </Step>
+
+  <Step title="Detach and reattach">
+    Press `Ctrl+D` to detach.
+    
+    Later, reattach:
+    ```bash
+    loom attach <weaver-id>
+    ```
+  </Step>
+</Steps>
+
+## CLI Commands
+
+### Create Weaver
+
+```bash
+loom new [OPTIONS]
+loom weaver new [OPTIONS]  # Alias
+```
+
+<ParamField path="--image" type="string">
+  Container image to use
+  
+  Default: `ghcr.io/ghuntley/loom/weaver:latest`
+</ParamField>
+
+<ParamField path="--org" type="string">
+  Organization ID for the weaver
+  
+  Defaults to your personal organization if not specified.
+</ParamField>
+
+<ParamField path="--repo" type="string">
+  Git repository to clone (public HTTPS URL)
+  
+  Example: `https://github.com/user/project`
+</ParamField>
+
+<ParamField path="--branch" type="string">
+  Branch to checkout after cloning
+  
+  Default: Repository default branch
+</ParamField>
+
+<ParamField path="-e, --env" type="KEY=VALUE" repeatable>
+  Environment variable for the container
+  
+  Can be specified multiple times:
+  ```bash
+  loom new -e NODE_ENV=production -e DEBUG=1
+  ```
+</ParamField>
+
+<ParamField path="--ttl" type="integer">
+  Lifetime in hours (max: 48)
+  
+  Default: 4 hours
+  
+  Weaver is automatically deleted when TTL expires.
+</ParamField>
+
+### List Weavers
+
+```bash
+loom weaver ps [--json]
+```
+
+<CodeGroup>
+```bash Terminal Output
+$ loom weaver ps
+ID                                    IMAGE                    STATUS     AGE     TTL
+W-018e2b3c-4d5e-7f8a-9b0c-1d2e3f4a5b6c ghcr.io/ghuntley/...    Running    1.5h    4h
+W-018e2b3c-5e6f-8a9b-0c1d-2e3f4a5b6c7d ghcr.io/ghuntley/...    Pending    0.1h    24h
+```
+
+```json JSON Output
+[
+  {
+    "id": "W-018e2b3c-4d5e-7f8a-9b0c-1d2e3f4a5b6c",
+    "image": "ghcr.io/ghuntley/loom/weaver:latest",
+    "status": "Running",
+    "age_hours": 1.5,
+    "lifetime_hours": 4
+  }
+]
+```
+</CodeGroup>
+
+### Attach to Weaver
+
+```bash
+loom attach <weaver-id>
+loom weaver attach <weaver-id>  # Alias
+```
+
+Attaches your terminal to the running weaver. Press `Ctrl+D` or `exit` to detach.
+
+<Note>
+  Attaching does NOT create a new session. Multiple users can attach to the same weaver simultaneously.
+</Note>
+
+### Delete Weaver
+
+```bash
+loom weaver delete <weaver-id>
+```
+
+Immediately terminates the pod and removes all data. This operation is irreversible.
+
+## Server API
+
+### Create Weaver
+
+```bash
+POST /api/weavers
+```
+
+**Request:**
+```json
+{
+  "image": "ghcr.io/ghuntley/loom/weaver:latest",
+  "org_id": "O-123...",
+  "env": {
+    "NODE_ENV": "production"
+  },
+  "repo": "https://github.com/user/project",
+  "branch": "main",
+  "lifetime_hours": 4
+}
+```
+
+**Response:**
+```json
+{
+  "id": "W-018e2b3c-4d5e-7f8a-9b0c-1d2e3f4a5b6c",
+  "image": "ghcr.io/ghuntley/loom/weaver:latest",
+  "status": "Pending",
+  "created_at": "2025-03-03T10:00:00Z",
+  "lifetime_hours": 4,
+  "expires_at": "2025-03-03T14:00:00Z"
+}
+```
+
+### List Weavers
+
+```bash
+GET /api/weavers
+```
+
+Returns all weavers for the authenticated user's organization.
+
+### Get Weaver Status
+
+```bash
+GET /api/weavers/:id
+```
+
+**Response:**
+```json
+{
+  "id": "W-018e2b3c-4d5e-7f8a-9b0c-1d2e3f4a5b6c",
+  "status": "Running",
+  "pod_name": "weaver-018e2b3c-4d5e-7f8a-9b0c-1d2e3f4a5b6c",
+  "pod_phase": "Running",
+  "pod_ip": "10.244.1.5",
+  "age_hours": 2.3,
+  "remaining_hours": 1.7
+}
+```
+
+### Attach Terminal (WebSocket)
+
+```bash
+GET /api/weavers/:id/attach
+```
+
+Upgrades to WebSocket connection for bidirectional terminal I/O.
+
+**Protocol:**
+- Client sends stdin as text frames
+- Server sends stdout/stderr as text frames
+- Resize events as JSON: `{"type": "resize", "rows": 24, "cols": 80}`
+
+### Delete Weaver
+
+```bash
+DELETE /api/weavers/:id
+```
+
+Terminates the pod and cleans up resources.
+
+## Lifecycle Management
+
+### Status States
+
+<Steps>
+  <Step title="Pending">
+    Pod is being created by Kubernetes.
+  </Step>
+
+  <Step title="Running">
+    Pod is active and accepting connections.
+  </Step>
+
+  <Step title="Succeeded">
+    Pod completed successfully (rare for weavers).
+  </Step>
+
+  <Step title="Failed">
+    Pod encountered an error (check logs).
+  </Step>
+
+  <Step title="Unknown">
+    Kubernetes lost contact with the pod.
+  </Step>
+</Steps>
+
+### Automatic Cleanup
+
+The `WeaverCleanupJob` runs every 60 seconds to:
+
+1. Query all weavers from database
+2. Check if `created_at + lifetime_hours > now`
+3. Delete expired weavers via Kubernetes API
+4. Remove database records
+
+**Configuration:**
+```bash
+LOOM_SERVER_WEAVER_CLEANUP_INTERVAL_SECS=60
+```
+
+## Kubernetes Integration
+
+### Pod Specification
+
+Weavers are created as Kubernetes Pods with:
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: weaver-{uuid}
+  namespace: loom-weavers
+  labels:
+    app: loom-weaver
+    weaver-id: W-{uuid}
+spec:
+  containers:
+  - name: weaver
+    image: {user-specified}
+    env:
+    - name: LOOM_WEAVER_ID
+      value: W-{uuid}
+    # User-provided env vars
+  restartPolicy: Never
+```
+
+### Resource Limits
+
+Default limits (configurable per deployment):
+
+```yaml
+resources:
+  requests:
+    memory: "512Mi"
+    cpu: "500m"
+  limits:
+    memory: "2Gi"
+    cpu: "2000m"
+```
+
+### Namespace Setup
+
+Server validates the namespace on startup:
+
+```rust
+if let Err(e) = provisioner.validate_namespace().await {
+    tracing::error!(error = %e, "Weaver provisioner namespace validation failed");
+}
+```
+
+Create the namespace manually:
+```bash
+sudo kubectl create namespace loom-weavers
+```
+
+## Weaver Images
+
+A weaver image must:
+
+1. Include `loom` binary in `$PATH`
+2. Run a persistent process (e.g., `loom` REPL)
+3. Accept terminal connections
+
+### Official Image
+
+```dockerfile
+FROM nixos/nix:latest
+
+# Install Loom
+RUN nix-env -iA nixpkgs.loom
+
+# Set entrypoint
+ENTRYPOINT ["/bin/sh"]
+CMD ["-c", "loom"]
+```
+
+Build and publish:
+```bash
+nix build .#weaver-image
+docker load < result
+docker push ghcr.io/ghuntley/loom/weaver:latest
+```
+
+### Custom Images
+
+You can use any image that:
+- Runs a shell or REPL
+- Has development tools installed
+- Optionally pre-installs dependencies
+
+```bash
+loom new --image my-org/custom-dev-env:v1.0
+```
+
+## Git Repository Cloning
+
+When `--repo` is specified:
+
+1. Weaver starts in empty workspace
+2. Loom automatically runs: `git clone {repo}`
+3. If `--branch` provided: `git checkout {branch}`
+4. Workspace root set to cloned directory
+
+<Warning>
+  Only public HTTPS repositories are supported. Private repos require SSH keys or credentials in the image.
+</Warning>
+
+## Security Considerations
+
+### Isolation
+
+- Each weaver runs in a separate pod
+- Network policies can restrict pod-to-pod communication
+- No persistent volumes by default
+
+### Image Trust
+
+Always use trusted images:
+```bash
+# Official images
+ghcr.io/ghuntley/loom/weaver:latest
+
+# Verified images
+my-registry/verified/dev-env:v1.0
+```
+
+<Warning>
+  Never use unverified public images. They may contain malware or leak sensitive data.
+</Warning>
+
+### Secrets Management
+
+- Use `loom-weaver-secrets` crate for secure secret injection
+- Avoid passing secrets via `--env` (visible in pod spec)
+- Use Kubernetes Secrets for sensitive data
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Weaver stuck in Pending">
+    Check pod status:
+    ```bash
+    sudo kubectl describe pod -n loom-weavers <pod-name>
+    ```
+    
+    Common causes:
+    - Image pull failure (check `events`)
+    - Insufficient cluster resources
+    - Invalid image name
+  </Accordion>
+
+  <Accordion title="Weaver immediately shows Succeeded">
+    The container exited because it has no long-running process.
+    
+    Fix:
+    - Ensure image has `ENTRYPOINT` or `CMD` that blocks
+    - Use `loom` REPL as the main process
+  </Accordion>
+
+  <Accordion title="Cannot attach to weaver">
+    Check if pod is running:
+    ```bash
+    sudo kubectl get pod -n loom-weavers <pod-name>
+    ```
+    
+    View logs:
+    ```bash
+    sudo kubectl logs -n loom-weavers <pod-name>
+    ```
+  </Accordion>
+
+  <Accordion title="Weaver deleted before TTL expired">
+    Check server logs:
+    ```bash
+    sudo journalctl -u loom-server -f | grep -i weaver
+    ```
+    
+    Possible causes:
+    - Manual deletion
+    - Server restart with TTL recalculation
+    - Database inconsistency
+  </Accordion>
+</AccordionGroup>
+
+## Advanced Usage
+
+### SSH Access
+
+```bash
+loom ssh <weaver-id>
+```
+
+Establishes SSH connection through WireGuard tunnel. Requires:
+- WireGuard tunnel configured (`loom tunnel up`)
+- SSH server running in weaver image
+
+### WireGuard Tunnel
+
+```bash
+# Start tunnel to weaver
+loom tunnel up <weaver-id>
+
+# Check status
+loom tunnel status
+
+# Stop tunnel
+loom tunnel down
+```
+
+Enables direct network access to weaver pods for SSH, databases, etc.
+
+### Webhook Notifications
+
+Configure webhooks for weaver lifecycle events:
+
+```rust
+WebhookConfig {
+  url: "https://example.com/webhooks/weaver",
+  events: vec![Created, Running, Deleted, Failed],
+}
+```
+
+Payload:
+```json
+{
+  "event": "weaver.created",
+  "weaver_id": "W-...",
+  "timestamp": "2025-03-03T10:00:00Z",
+  "data": { ... }
+}
+```
+
+## Performance Tuning
+
+### Pod Startup Time
+
+Reduce cold start latency:
+- Use smaller base images (Alpine, distroless)
+- Pre-pull images on cluster nodes
+- Increase pod resource requests
+
+### Resource Allocation
+
+Adjust based on workload:
+```rust
+ResourceSpec {
+  cpu_millicores: 1000,  // 1 CPU
+  memory_mb: 2048,       // 2 GB
+}
+```
+
+### Cleanup Performance
+
+For large deployments, increase cleanup frequency:
+```bash
+LOOM_SERVER_WEAVER_CLEANUP_INTERVAL_SECS=30
+```

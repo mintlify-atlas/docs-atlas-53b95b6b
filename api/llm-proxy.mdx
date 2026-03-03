@@ -1,0 +1,392 @@
+---
+title: LLM Proxy Endpoints
+description: Server-side LLM completions for Anthropic, OpenAI, Vertex AI, and Z.ai
+---
+
+## Overview
+
+The LLM proxy endpoints allow clients to make LLM completion requests through the Loom server without exposing API keys. The server handles:
+
+- API key management and rotation
+- Request/response logging and auditing
+- Rate limiting and retry logic
+- Token usage tracking
+- Server-to-client queries during streaming
+
+**Supported Providers**:
+
+- **Anthropic** (Claude models)
+- **OpenAI** (GPT models)
+- **Vertex AI** (Google Cloud)
+- **Z.ai** (Z.ai models)
+
+## Request Format
+
+All proxy endpoints accept a standard `LlmRequest` payload:
+
+<ParamField body="model" type="string" required>
+  Model identifier (e.g., `"claude-sonnet-4"`, `"gpt-4o"`)
+</ParamField>
+
+<ParamField body="messages" type="array" required>
+  Array of message objects with `role` and `content`
+</ParamField>
+
+<ParamField body="tools" type="array" default="[]">
+  Tool definitions for function calling
+</ParamField>
+
+<ParamField body="system" type="string" optional>
+  System prompt
+</ParamField>
+
+<ParamField body="max_tokens" type="integer" optional>
+  Maximum tokens to generate
+</ParamField>
+
+<ParamField body="temperature" type="number" optional>
+  Sampling temperature (0.0-1.0)
+</ParamField>
+
+## Anthropic Complete
+
+```http
+POST /proxy/anthropic/complete
+```
+
+Synchronous Anthropic completion. Returns the full response when complete.
+
+### Request Body
+
+See [Request Format](#request-format) above.
+
+### Response
+
+<ResponseField name="message" type="object">
+  Assistant message with `role: "assistant"` and `content`
+</ResponseField>
+
+<ResponseField name="tool_calls" type="array">
+  Array of tool call objects (if any)
+</ResponseField>
+
+<ResponseField name="usage" type="object" nullable>
+  Token usage: `{input_tokens: number, output_tokens: number}`
+</ResponseField>
+
+<ResponseField name="finish_reason" type="string" nullable>
+  Reason for completion: `"stop"`, `"length"`, `"tool_use"`, etc.
+</ResponseField>
+
+### Example
+
+```bash
+curl -X POST https://loom.ghuntley.com/proxy/anthropic/complete \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-sonnet-4",
+    "messages": [
+      {"role": "user", "content": "Explain Rust ownership in one sentence."}
+    ],
+    "max_tokens": 100
+  }'
+```
+
+**Response (200 OK)**:
+
+```json
+{
+  "message": {
+    "role": "assistant",
+    "content": "Rust ownership ensures memory safety by enforcing that each value has a single owner, automatically deallocating memory when the owner goes out of scope."
+  },
+  "tool_calls": [],
+  "usage": {
+    "input_tokens": 18,
+    "output_tokens": 31
+  },
+  "finish_reason": "stop"
+}
+```
+
+## Anthropic Stream
+
+```http
+POST /proxy/anthropic/stream
+```
+
+Streaming Anthropic completion via Server-Sent Events (SSE).
+
+### Request Body
+
+See [Request Format](#request-format) above.
+
+### Response
+
+Returns `text/event-stream` with events tagged as `event: llm`.
+
+### Event Types
+
+#### Text Delta
+
+```json
+{"type": "text_delta", "content": "Rust ownership"}
+```
+
+#### Tool Call Delta
+
+```json
+{
+  "type": "tool_call_delta",
+  "call_id": "call_abc123",
+  "tool_name": "read_file",
+  "arguments_fragment": "{\"path\":\"/src"
+}
+```
+
+#### Server Query
+
+Server requests information from the client:
+
+```json
+{
+  "type": "server_query",
+  "id": "Q-abc123",
+  "kind": {"ReadFile": {"path": "/test.txt"}},
+  "sent_at": "2026-03-03T12:00:00Z",
+  "timeout_secs": 30,
+  "metadata": {}
+}
+```
+
+Client must respond via `POST /api/sessions/{session_id}/query-response`.
+
+#### Completed
+
+```json
+{
+  "type": "completed",
+  "response": {
+    "message": {...},
+    "tool_calls": [...],
+    "usage": {...},
+    "finish_reason": "stop"
+  }
+}
+```
+
+#### Error
+
+```json
+{"type": "error", "message": "Rate limited; retry after 30 seconds"}
+```
+
+### Example
+
+```bash
+curl -N -X POST https://loom.ghuntley.com/proxy/anthropic/stream \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-sonnet-4",
+    "messages": [
+      {"role": "user", "content": "Write a haiku about coding."}
+    ]
+  }'
+```
+
+**Stream output**:
+
+```
+event: llm
+data: {"type":"text_delta","content":"Code"}
+
+event: llm
+data: {"type":"text_delta","content":" flows like"}
+
+event: llm
+data: {"type":"text_delta","content":" water\\n"}
+
+event: llm
+data: {"type":"completed","response":{"message":{...},"tool_calls":[],"usage":{...},"finish_reason":"stop"}}
+```
+
+## OpenAI Complete
+
+```http
+POST /proxy/openai/complete
+```
+
+Synchronous OpenAI completion.
+
+### Request/Response
+
+Same format as Anthropic endpoints. See [Request Format](#request-format) and [Anthropic Complete](#anthropic-complete).
+
+### Example
+
+```bash
+curl -X POST https://loom.ghuntley.com/proxy/openai/complete \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4o",
+    "messages": [
+      {"role": "user", "content": "What is the capital of France?"}
+    ]
+  }'
+```
+
+## OpenAI Stream
+
+```http
+POST /proxy/openai/stream
+```
+
+Streaming OpenAI completion via SSE. Same event format as [Anthropic Stream](#anthropic-stream).
+
+### Example
+
+```bash
+curl -N -X POST https://loom.ghuntley.com/proxy/openai/stream \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4o",
+    "messages": [
+      {"role": "user", "content": "Count to 5."}
+    ]
+  }'
+```
+
+## Vertex Complete
+
+```http
+POST /proxy/vertex/complete
+```
+
+Synchronous Vertex AI completion (Google Cloud).
+
+### Request/Response
+
+Same format as Anthropic endpoints. See [Request Format](#request-format) and [Anthropic Complete](#anthropic-complete).
+
+### Example
+
+```bash
+curl -X POST https://loom.ghuntley.com/proxy/vertex/complete \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemini-2.0-flash-exp",
+    "messages": [
+      {"role": "user", "content": "Summarize quantum computing."}
+    ]
+  }'
+```
+
+## Vertex Stream
+
+```http
+POST /proxy/vertex/stream
+```
+
+Streaming Vertex AI completion via SSE. Same event format as [Anthropic Stream](#anthropic-stream).
+
+### Example
+
+```bash
+curl -N -X POST https://loom.ghuntley.com/proxy/vertex/stream \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemini-2.0-flash-exp",
+    "messages": [
+      {"role": "user", "content": "Explain async/await."}
+    ]
+  }'
+```
+
+## Z.ai Complete
+
+```http
+POST /proxy/zai/complete
+```
+
+Synchronous Z.ai completion.
+
+### Request/Response
+
+Same format as Anthropic endpoints. See [Request Format](#request-format) and [Anthropic Complete](#anthropic-complete).
+
+### Example
+
+```bash
+curl -X POST https://loom.ghuntley.com/proxy/zai/complete \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "z.ai-model",
+    "messages": [
+      {"role": "user", "content": "Hello, world!"}
+    ]
+  }'
+```
+
+## Z.ai Stream
+
+```http
+POST /proxy/zai/stream
+```
+
+Streaming Z.ai completion via SSE. Same event format as [Anthropic Stream](#anthropic-stream).
+
+### Example
+
+```bash
+curl -N -X POST https://loom.ghuntley.com/proxy/zai/stream \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "z.ai-model",
+    "messages": [
+      {"role": "user", "content": "Tell me a joke."}
+    ]
+  }'
+```
+
+## Error Handling
+
+All endpoints return errors in this format:
+
+```json
+{
+  "error": "service_unavailable",
+  "message": "Anthropic provider is not configured on the server"
+}
+```
+
+### Common Errors
+
+| Status | Error Code | Description |
+|--------|------------|-------------|
+| 503 | `service_unavailable` | Provider not configured or unavailable |
+| 503 | `rate_limited` | Upstream rate limit hit |
+| 504 | `timeout` | LLM request timed out |
+| 500 | `upstream_error` | Provider returned an error |
+
+### Rate Limiting
+
+When rate limited, the response includes retry information:
+
+```json
+{
+  "error": "rate_limited",
+  "message": "LLM rate limited; retry after 30 seconds"
+}
+```
+
+Clients should respect the retry delay and implement exponential backoff.
+
+## Audit Logging
+
+All LLM requests are logged for audit purposes:
+
+- **LlmRequestStarted**: Provider, model, message count
+- **LlmRequestCompleted**: Provider, model, tool call count
+- **LlmRequestFailed**: Provider, model, error message
+
+Logs are queryable via the admin audit log endpoints.

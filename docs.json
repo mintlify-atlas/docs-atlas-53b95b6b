@@ -1,122 +1,108 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mint Starter Kit",
+  "name": "Loom",
+  "theme": "aspen",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#8B5CF6",
+    "light": "#A78BFA",
+    "dark": "#6D28D9"
   },
-  "favicon": "/favicon.svg",
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/ghuntley/loom"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/ghuntley/loom"
+    }
+  },
   "navigation": {
     "tabs": [
       {
-        "tab": "Guides",
+        "tab": "Documentation",
         "groups": [
           {
-            "group": "Getting started",
+            "group": "Get Started",
             "pages": [
-              "index",
+              "introduction",
               "quickstart",
-              "development"
+              "installation"
             ]
           },
           {
-            "group": "Customization",
+            "group": "Core Features",
             "pages": [
-              "essentials/settings",
-              "essentials/navigation"
+              "features/cli",
+              "features/server",
+              "features/weavers",
+              "features/tools",
+              "features/thread-system"
             ]
           },
           {
-            "group": "Writing content",
+            "group": "Architecture",
             "pages": [
-              "essentials/markdown",
-              "essentials/code",
-              "essentials/images",
-              "essentials/reusable-snippets"
+              "architecture/overview",
+              "architecture/llm-proxy",
+              "architecture/workspace-structure",
+              "architecture/state-machine"
             ]
           },
           {
-            "group": "AI tools",
+            "group": "Integrations",
             "pages": [
-              "ai-tools/cursor",
-              "ai-tools/claude-code",
-              "ai-tools/windsurf"
+              "integrations/authentication",
+              "integrations/llm-providers",
+              "integrations/github",
+              "integrations/editors"
+            ]
+          },
+          {
+            "group": "Observability",
+            "pages": [
+              "observability/analytics",
+              "observability/crash-tracking",
+              "observability/cron-monitoring",
+              "observability/sessions"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "deployment/server-setup",
+              "deployment/kubernetes",
+              "deployment/configuration",
+              "deployment/database"
             ]
           }
         ]
       },
       {
-        "tab": "API reference",
+        "tab": "API Reference",
         "groups": [
           {
-            "group": "API documentation",
+            "group": "HTTP API",
             "pages": [
-              "api-reference/introduction"
+              "api/overview",
+              "api/authentication",
+              "api/threads",
+              "api/weavers",
+              "api/llm-proxy"
             ]
           },
           {
-            "group": "Endpoint examples",
+            "group": "CLI Commands",
             "pages": [
-              "api-reference/endpoint/get",
-              "api-reference/endpoint/create",
-              "api-reference/endpoint/delete",
-              "api-reference/endpoint/webhook"
+              "cli/overview",
+              "cli/repl",
+              "cli/weaver",
+              "cli/auth"
             ]
           }
         ]
       }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
-  },
-  "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
-    "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://dashboard.mintlify.com"
-    }
-  },
-  "contextual": {
-    "options": [
-     "copy",
-     "view",
-     "chatgpt",
-     "claude",
-     "perplexity",
-     "mcp",
-     "cursor",
-     "vscode"
-   ]
-  },
-  "footer": {
-    "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
-    }
+    ]
   }
 }

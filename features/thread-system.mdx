@@ -1,0 +1,625 @@
+---
+title: "Thread System"
+description: "Conversation persistence, synchronization, and search for Loom AI coding sessions"
+---
+
+# Thread System
+
+Loom's thread system provides persistent conversation history with bidirectional synchronization between local storage and the server. Every coding session is a **thread** that captures:
+
+- Complete message history (user, assistant, tool calls)
+- Agent state (waiting, executing tools, error)
+- Git context (branch, commits, remote URL)
+- Workspace metadata
+
+## Architecture
+
+```
+┌─────────────────┐
+│  loom CLI       │
+│  ┌───────────┐  │
+│  │  Thread   │  │
+│  └─────┬─────┘  │
+│        │        │
+└────────┼────────┘
+         │
+         ▼
+┌────────────────────┐       ┌──────────────────┐
+│ SyncingThreadStore │◀─────▶│ LocalThreadStore │
+└────────┬───────────┘       └──────────────────┘
+         │                    ~/.local/share/loom/threads/
+         ▼
+┌────────────────────┐
+│ ThreadSyncClient   │
+└────────┬───────────┘
+         │ HTTPS
+         ▼
+┌────────────────────┐
+│ loom-server        │
+│ /api/threads       │
+└────────┬───────────┘
+         │
+         ▼
+┌────────────────────┐
+│ PostgreSQL         │
+│ threads table      │
+└────────────────────┘
+```
+
+**Components:**
+
+- `Thread`: Core data model (defined in `loom-common-thread/src/model.rs`)
+- `LocalThreadStore`: XDG-compliant local storage
+- `SyncingThreadStore`: Hybrid store with background sync
+- `ThreadSyncClient`: HTTP client for server communication
+- `PendingSyncQueue`: Offline-first sync queue
+
+## Thread Data Model
+
+### Thread Structure
+
+```rust
+pub struct Thread {
+    // Identity
+    pub id: ThreadId,                    // T-<uuidv7>
+    pub version: u64,                    // Optimistic locking
+    pub created_at: String,              // ISO 8601
+    pub updated_at: String,
+    pub last_activity_at: String,
+
+    // Workspace context
+    pub workspace_root: Option<String>,  // /home/user/project
+    pub cwd: Option<String>,             // /home/user/project/src
+    pub loom_version: Option<String>,    // 0.1.0
+
+    // Git metadata
+    pub git_branch: Option<String>,              // main
+    pub git_remote_url: Option<String>,          // github.com/user/repo
+    pub git_initial_branch: Option<String>,
+    pub git_initial_commit_sha: Option<String>,
+    pub git_current_commit_sha: Option<String>,
+    pub git_commits: Vec<String>,                // [sha1, sha2, ...]
+    pub git_start_dirty: Option<bool>,
+    pub git_end_dirty: Option<bool>,
+
+    // LLM configuration
+    pub provider: Option<String>,        // anthropic
+    pub model: Option<String>,           // claude-3-5-sonnet-20241022
+
+    // Conversation data
+    pub conversation: ConversationSnapshot,
+    pub agent_state: AgentStateSnapshot,
+    pub metadata: ThreadMetadata,
+
+    // Sync metadata
+    pub is_private: bool,                // Never sync if true
+    pub visibility: ThreadVisibility,    // organization, private, public
+    pub is_shared_with_support: bool,
+}
+```
+
+### Thread ID Format
+
+Thread IDs use UUIDv7 (time-ordered) with a `T-` prefix:
+
+```
+T-018e2b3c-4d5e-7f8a-9b0c-1d2e3f4a5b6c
+│ └────────────────┬──────────────────┘
+│                  └─ UUIDv7 (sortable by creation time)
+└─ Prefix for visual identification
+```
+
+**Benefits:**
+- Sortable by creation time
+- No collision risk (globally unique)
+- Human-readable prefix
+- Compatible with databases (indexed strings)
+
+### Message Types
+
+<Tabs>
+  <Tab title="User">
+    ```json
+    {
+      "role": "user",
+      "content": "Add error handling to login function"
+    }
+    ```
+  </Tab>
+
+  <Tab title="Assistant">
+    ```json
+    {
+      "role": "assistant",
+      "content": "I'll add error handling to the login function.",
+      "tool_calls": [
+        {
+          "id": "call_abc123",
+          "tool_name": "read_file",
+          "arguments_json": {"path": "src/auth.rs"}
+        }
+      ]
+    }
+    ```
+  </Tab>
+
+  <Tab title="Tool">
+    ```json
+    {
+      "role": "tool",
+      "tool_call_id": "call_abc123",
+      "tool_name": "read_file",
+      "content": "{\"path\": \"src/auth.rs\", \"contents\": \"...\"}"
+    }
+    ```
+  </Tab>
+</Tabs>
+
+### Agent States
+
+```rust
+pub enum AgentStateKind {
+    WaitingForUserInput,      // Idle, ready for input
+    CallingLlm,               // Sending request to LLM
+    ProcessingLlmResponse,    // Parsing LLM response
+    ExecutingTools,           // Running tool calls
+    PostToolsHook,            // Post-tool processing (e.g., auto-commit)
+    Error,                    // Recoverable error (retries possible)
+    ShuttingDown,             // Graceful shutdown in progress
+}
+```
+
+Each state includes:
+- Retry count (for error recovery)
+- Last error message (if applicable)
+- Pending tool calls (for `ExecutingTools`)
+
+### Thread Visibility
+
+```rust
+pub enum ThreadVisibility {
+    Organization,  // Visible to all org members (default)
+    Private,       // Synced but only owner can access
+    Public,        // Publicly visible (use with caution)
+}
+```
+
+**Sharing workflow:**
+```bash
+# Share with organization
+loom share <thread-id> --visibility organization
+
+# Share with support
+loom share <thread-id> --support
+
+# Make private
+loom share <thread-id> --visibility private
+```
+
+## Local Storage
+
+### XDG Directory
+
+Threads are stored in:
+
+```
+~/.local/share/loom/threads/
+├── T-018e2b3c-4d5e-7f8a-9b0c-1d2e3f4a5b6c.json
+├── T-018e2b3c-5e6f-8a9b-0c1d-2e3f4a5b6c7d.json
+└── ...
+```
+
+**File format:** Pretty-printed JSON (human-readable)
+
+### LocalThreadStore API
+
+```rust
+pub trait ThreadStore: Send + Sync {
+    async fn load(&self, id: &ThreadId) -> Result<Option<Thread>>;
+    async fn save(&self, thread: &Thread) -> Result<()>;
+    async fn list(&self, limit: u32) -> Result<Vec<ThreadSummary>>;
+    async fn delete(&self, id: &ThreadId) -> Result<()>;
+    async fn save_and_sync(&self, thread: &Thread) -> Result<()>;
+}
+```
+
+<Note>
+  `save_and_sync()` blocks until server sync completes. Use for commands that exit immediately (e.g., `loom share`).
+</Note>
+
+### Local Search
+
+Fallback when server is unavailable:
+
+```rust
+pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<ThreadSummary>>
+```
+
+Searches:
+- Thread title
+- Git branch name
+- Git remote URL
+- Commit SHAs (prefix match)
+- Tags
+- Message content (full text)
+
+## Server Synchronization
+
+### Sync Strategy
+
+Loom uses **offline-first** synchronization:
+
+<Steps>
+  <Step title="Save locally first">
+    ```rust
+    local_store.save(thread).await?;
+    ```
+  </Step>
+
+  <Step title="Queue for sync">
+    ```rust
+    pending_sync_queue.enqueue(SyncOperation::Upsert(thread.id));
+    ```
+  </Step>
+
+  <Step title="Background sync">
+    Spawned task processes queue:
+    ```rust
+    sync_client.upsert_thread(thread).await?;
+    ```
+  </Step>
+
+  <Step title="Handle conflicts">
+    Server returns latest version on conflict. Client merges or retries.
+  </Step>
+</Steps>
+
+**Benefits:**
+- Works offline (local-first)
+- No blocking on network
+- Automatic retry on failure
+- Conflict detection via versioning
+
+### SyncingThreadStore
+
+```rust
+pub struct SyncingThreadStore {
+    local: LocalThreadStore,
+    sync_client: Option<ThreadSyncClient>,
+    pending_sync: Arc<PendingSyncQueue>,
+}
+```
+
+**Usage:**
+```rust
+let local_store = LocalThreadStore::from_xdg()?;
+let sync_client = ThreadSyncClient::new(server_url, http_client)
+    .with_auth_token(token);
+let store = SyncingThreadStore::with_sync(local_store, sync_client);
+```
+
+### Sync API Endpoints
+
+<Tabs>
+  <Tab title="Upsert Thread">
+    ```bash
+    POST /api/threads
+    PUT /api/threads/:id
+    ```
+    
+    Creates or updates a thread. Server validates:
+    - Thread ownership (via auth token)
+    - Version number (optimistic locking)
+    - Visibility rules
+  </Tab>
+
+  <Tab title="Fetch Thread">
+    ```bash
+    GET /api/threads/:id
+    ```
+    
+    Returns thread if:
+    - User owns thread, OR
+    - Thread visibility allows access
+  </Tab>
+
+  <Tab title="List Threads">
+    ```bash
+    GET /api/threads?limit=50
+    ```
+    
+    Returns user's threads, sorted by `last_activity_at` DESC.
+  </Tab>
+
+  <Tab title="Search Threads">
+    ```bash
+    GET /api/threads/search?q=query&limit=20
+    ```
+    
+    Full-text search powered by PostgreSQL `ts_vector`.
+  </Tab>
+</Tabs>
+
+## Git Integration
+
+Loom automatically captures git state:
+
+### Snapshot Workflow
+
+```rust
+fn snapshot_git_state(thread: &mut Thread, workspace_path: &Path) {
+    match detect_repo_status(workspace_path) {
+        Ok(Some(status)) => {
+            // Initial state (first snapshot)
+            if thread.git_initial_branch.is_none() {
+                thread.git_initial_branch = status.branch.clone();
+                thread.git_initial_commit_sha = status.head.as_ref().map(|h| h.sha.clone());
+                thread.git_start_dirty = status.is_dirty;
+            }
+
+            // Current state (every save)
+            thread.git_branch = status.branch;
+            thread.git_current_commit_sha = status.head.as_ref().map(|h| h.sha.clone());
+            thread.git_end_dirty = status.is_dirty;
+
+            // Track commits
+            if let Some(ref sha) = status.head.as_ref().map(|h| h.sha.clone()) {
+                if !thread.git_commits.contains(sha) {
+                    thread.git_commits.push(sha.clone());
+                }
+            }
+
+            // Remote URL (normalized)
+            if thread.git_remote_url.is_none() {
+                thread.git_remote_url = status.remote_slug;
+            }
+        }
+        Ok(None) => { /* Not a git repo */ }
+        Err(e) => { /* Git unavailable */ }
+    }
+}
+```
+
+**Called:**
+- On thread creation
+- After every tool execution
+- On graceful shutdown (Ctrl+C, EOF)
+
+### Search by Git Metadata
+
+```bash
+# Find threads for a branch
+loom search "feature/auth"
+
+# Find threads for a repository
+loom search "github.com/user/project"
+
+# Find threads with specific commit
+loom search "a1b2c3d"
+```
+
+## Private Sessions
+
+Create local-only sessions that never sync:
+
+```bash
+loom private
+```
+
+Sets:
+- `is_private = true`
+- `visibility = Private`
+
+The `SyncingThreadStore` skips sync for private threads:
+
+```rust
+if thread.is_private {
+    tracing::debug!("skipping sync for private thread");
+    return Ok(());
+}
+```
+
+**Use cases:**
+- Sensitive codebases
+- Offline development
+- Personal experiments
+
+## Thread Lifecycle
+
+<Steps>
+  <Step title="Creation">
+    ```rust
+    let mut thread = Thread::new();
+    thread.workspace_root = Some(workspace.display().to_string());
+    snapshot_git_state(&mut thread, &workspace);
+    store.save(&thread).await?;
+    ```
+  </Step>
+
+  <Step title="User Input">
+    ```rust
+    let user_message = Message::user(input);
+    thread.conversation.messages.push(MessageSnapshot::from(&user_message));
+    ```
+  </Step>
+
+  <Step title="LLM Response">
+    ```rust
+    let assistant_message = Message::assistant_with_tool_calls(content, tool_calls);
+    thread.conversation.messages.push(MessageSnapshot::from(&assistant_message));
+    ```
+  </Step>
+
+  <Step title="Tool Execution">
+    ```rust
+    for tool_call in &tool_calls {
+        let outcome = execute_tool(registry, tool_call, &ctx).await;
+        let tool_message = Message::tool(&tool_call.id, &tool_call.tool_name, &result);
+        thread.conversation.messages.push(MessageSnapshot::from(&tool_message));
+    }
+    ```
+  </Step>
+
+  <Step title="State Update">
+    ```rust
+    thread.agent_state = AgentStateSnapshot {
+        kind: AgentStateKind::WaitingForUserInput,
+        retries: 0,
+        last_error: None,
+        pending_tool_calls: Vec::new(),
+    };
+    snapshot_git_state(&mut thread, &workspace);
+    thread.touch();  // Update last_activity_at
+    store.save(&thread).await?;
+    ```
+  </Step>
+</Steps>
+
+## Resume Behavior
+
+```bash
+loom resume <thread-id>
+```
+
+Restores:
+- Full conversation history
+- Agent state (resumes from last checkpoint)
+- Workspace context (warns if workspace changed)
+- Git state (shows branch/commit changes)
+
+**Example output:**
+```
+Resuming thread: T-018e2b3c-4d5e-7f8a-9b0c-1d2e3f4a5b6c
+Title: "Add authentication to API"
+Messages: 23
+Last activity: 2 hours ago
+Git: main @ a1b2c3d (dirty)
+```
+
+## Search Implementation
+
+### Server-Side Search
+
+PostgreSQL full-text search:
+
+```sql
+CREATE INDEX threads_search_idx ON threads USING gin(to_tsvector('english', 
+    coalesce(title, '') || ' ' || 
+    coalesce(git_branch, '') || ' ' ||
+    coalesce(conversation::text, '')
+));
+```
+
+Query:
+```sql
+SELECT * FROM threads
+WHERE to_tsvector('english', ...) @@ plainto_tsquery('english', $1)
+ORDER BY ts_rank(...) DESC
+LIMIT $2;
+```
+
+### Local Search Fallback
+
+Substring matching across all fields:
+
+```rust
+fn matches_query(&self, thread: &Thread, query: &str) -> bool {
+    // Title
+    if thread.metadata.title.as_ref().map(|t| t.to_lowercase().contains(query)).unwrap_or(false) {
+        return true;
+    }
+    // Git metadata
+    if thread.git_branch.as_ref().map(|b| b.to_lowercase().contains(query)).unwrap_or(false) {
+        return true;
+    }
+    // Commit SHAs (prefix)
+    for sha in &thread.git_commits {
+        if sha.to_lowercase().starts_with(query) {
+            return true;
+        }
+    }
+    // Messages
+    for msg in &thread.conversation.messages {
+        if msg.content.to_lowercase().contains(query) {
+            return true;
+        }
+    }
+    false
+}
+```
+
+## Performance Optimizations
+
+<CardGroup cols={2}>
+  <Card title="Lazy Loading" icon="clock">
+    Thread summaries load minimal data. Full threads fetched on demand.
+  </Card>
+
+  <Card title="Background Sync" icon="rotate">
+    Non-blocking sync prevents UI lag. Errors retried automatically.
+  </Card>
+
+  <Card title="Local Caching" icon="database">
+    Recently accessed threads cached in memory (future enhancement).
+  </Card>
+
+  <Card title="Indexed Search" icon="magnifying-glass">
+    PostgreSQL GIN indexes for fast full-text queries.
+  </Card>
+</CardGroup>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Thread sync failed">
+    Check network connectivity:
+    ```bash
+    curl https://loom.ghuntley.com/health
+    ```
+    
+    Verify authentication:
+    ```bash
+    loom login
+    ```
+    
+    The thread is still saved locally. Sync retries automatically.
+  </Accordion>
+
+  <Accordion title="Thread not found">
+    List all threads:
+    ```bash
+    loom list
+    ```
+    
+    Search by content:
+    ```bash
+    loom search "keyword"
+    ```
+    
+    Check local storage:
+    ```bash
+    ls ~/.local/share/loom/threads/
+    ```
+  </Accordion>
+
+  <Accordion title="Version conflict">
+    Happens when thread modified on multiple devices simultaneously.
+    
+    The server returns HTTP 409. Client should:
+    1. Fetch latest version from server
+    2. Merge changes (manual or automatic)
+    3. Retry with updated version
+  </Accordion>
+
+  <Accordion title="Search returns no results">
+    Try:
+    - Broader query terms
+    - Different keywords (branch name, repo URL)
+    - Local search if server is down
+    
+    Verify thread exists:
+    ```bash
+    loom list | grep <keyword>
+    ```
+  </Accordion>
+</AccordionGroup>

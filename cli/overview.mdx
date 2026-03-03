@@ -1,0 +1,294 @@
+---
+title: CLI Overview
+description: Complete guide to the Loom CLI - an AI-powered coding agent with interactive REPL
+---
+
+## What is Loom CLI?
+
+Loom is an interactive AI-powered coding assistant that provides a REPL (Read-Eval-Print Loop) interface for natural language conversations with LLM agents. The agent has access to powerful tools for reading, editing, and executing code in your workspace.
+
+## Installation
+
+```bash
+# Build from source
+cd crates/loom-cli
+cargo build --release
+
+# Or use Nix (preferred for reproducible builds)
+nix build .#loom-cli-c2n
+```
+
+## Quick Start
+
+```bash
+# Authenticate with Loom server
+loom --server-url https://loom.ghuntley.com login
+
+# Start a new interactive session
+loom
+
+# Start a private (local-only) session
+loom private
+
+# Resume the most recent session
+loom resume
+```
+
+## Core Commands
+
+<CardGroup cols={2}>
+  <Card title="login" icon="right-to-bracket">
+    Authenticate with Loom services using device code flow
+  </Card>
+  <Card title="logout" icon="right-from-bracket">
+    Log out and clear credentials
+  </Card>
+  <Card title="resume" icon="rotate-left">
+    Resume an existing conversation thread
+  </Card>
+  <Card title="private" icon="lock">
+    Start a local-only session that never syncs
+  </Card>
+</CardGroup>
+
+## Global Flags
+
+<ParamField path="--config" type="string">
+  Path to custom configuration file
+</ParamField>
+
+<ParamField path="--workspace" type="string">
+  Workspace directory for file operations (defaults to current directory)
+</ParamField>
+
+<ParamField path="--log-level" type="string">
+  Log level: trace, debug, info, warn, error (overrides config)
+</ParamField>
+
+<ParamField path="--json-logs" type="boolean">
+  Output logs as JSON (overrides config)
+</ParamField>
+
+<ParamField path="--server-url" type="string" default="http://localhost:8080">
+  Loom server URL for LLM proxy
+  
+  Can also be set via `LOOM_SERVER_URL` environment variable
+</ParamField>
+
+<ParamField path="--provider" type="string" default="anthropic">
+  LLM provider to use: `anthropic` or `openai`
+  
+  Can also be set via `LOOM_LLM_PROVIDER` environment variable
+</ParamField>
+
+## Authentication
+
+### Device Code Flow
+
+Loom uses OAuth2 device code flow for authentication:
+
+```bash
+loom --server-url https://loom.ghuntley.com login
+```
+
+This will:
+1. Generate a device code and user code
+2. Open your browser to the verification URL
+3. Display the user code to enter
+4. Poll the server until you complete authorization
+5. Store the access token securely in your system keyring (with file fallback)
+
+### Credentials Storage
+
+Credentials are stored using `loom-cli-credentials` with:
+- **Primary**: System keyring (secure OS credential store)
+- **Fallback**: `~/.config/loom/credentials.json` (if keyring unavailable)
+
+### Logout
+
+```bash
+loom --server-url https://loom.ghuntley.com logout
+```
+
+This clears stored credentials and notifies the server to invalidate the token.
+
+## Thread Management
+
+### List Threads
+
+```bash
+loom list
+```
+
+Output:
+```
+ID                                       TITLE                           MSGS  LAST ACTIVITY
+----------------------------------------------------------------------------------------------------
+01HX2K3M4N5P6Q7R8S9T0V1W2X3Y4Z5A6B7C8D9E  Fix authentication bug             12  2024-03-15 14:23:11
+01HX2K3M4N5P6Q7R8S9T0V1W2X3Y4Z5A6B7C8D9F  Add new API endpoint                8  2024-03-15 10:15:42
+```
+
+### Resume Thread
+
+```bash
+# Resume most recent thread
+loom resume
+
+# Resume specific thread by ID
+loom resume 01HX2K3M4N5P6Q7R8S9T0V1W2X3Y4Z5A6B7C8D9E
+```
+
+### Private Sessions
+
+Private sessions are local-only and never sync to the server:
+
+```bash
+loom private
+```
+
+Use this for:
+- Working with sensitive code
+- Testing without server connectivity
+- Offline development
+
+### Search Threads
+
+```bash
+# Search by text, branch name, repo URL, or commit SHA
+loom search "authentication"
+
+# Limit results
+loom search "api" --limit 10
+
+# JSON output
+loom search "bug fix" --json
+```
+
+## Sharing Threads
+
+### Change Visibility
+
+```bash
+# Share with organization
+loom share --visibility organization
+
+# Make private
+loom share --visibility private
+
+# Make public
+loom share --visibility public
+
+# Share specific thread
+loom share <thread-id> --visibility organization
+```
+
+### Share with Support
+
+```bash
+# Share most recent thread with support team
+loom share --support
+
+# Share specific thread with support
+loom share <thread-id> --support
+```
+
+<Note>
+  Private sessions (created with `loom private`) cannot be shared. They remain local-only.
+</Note>
+
+## Configuration
+
+Loom uses a hierarchical configuration system:
+
+1. **Default config**: Built-in defaults
+2. **Config file**: `~/.config/loom/config.toml` (or custom via `--config`)
+3. **Environment variables**: `LOOM_*` prefixed vars
+4. **CLI flags**: Highest priority
+
+### Example Configuration
+
+```toml
+[global]
+default_provider = "anthropic"
+workspace_root = "/home/user/projects"
+
+[logging]
+level = "info"
+format = "pretty"  # pretty, compact, or json
+
+[tools]
+[tools.workspace]
+root = "/home/user/code"
+```
+
+## Version Information
+
+```bash
+loom version
+```
+
+Outputs:
+- Version number
+- Git commit hash
+- Build timestamp
+- Platform information
+
+## Self-Update
+
+```bash
+loom update
+```
+
+Updates Loom CLI to the latest version from the server.
+
+## Advanced Commands
+
+### ACP Agent Mode
+
+Run Loom as an Agent Client Protocol (ACP) agent for editor integration:
+
+```bash
+loom acp-agent
+```
+
+This mode communicates over stdio and is designed for IDE/editor plugins.
+
+### Git Credential Helper
+
+Configure git to use Loom for SCM authentication:
+
+```bash
+git config --global credential.https://loom.ghuntley.com.helper 'loom credential-helper'
+```
+
+## Environment Variables
+
+<ParamField path="LOOM_SERVER_URL" type="string">
+  Default server URL
+</ParamField>
+
+<ParamField path="LOOM_LLM_PROVIDER" type="string">
+  Default LLM provider (anthropic or openai)
+</ParamField>
+
+<ParamField path="LOOM_AUTO_COMMIT_DISABLE" type="boolean">
+  Disable automatic git commits (set to "true", "1", or "yes")
+</ParamField>
+
+<ParamField path="LOOM_THREAD_SYNC_URL" type="string">
+  Thread synchronization server URL
+</ParamField>
+
+## Related Pages
+
+<CardGroup cols={2}>
+  <Card title="REPL Commands" icon="terminal" href="/cli/repl">
+    Interactive REPL session commands and tools
+  </Card>
+  <Card title="Weaver Management" icon="cube" href="/cli/weaver">
+    Remote container session management
+  </Card>
+  <Card title="Authentication" icon="key" href="/cli/auth">
+    Device code flow and credential management
+  </Card>
+</CardGroup>

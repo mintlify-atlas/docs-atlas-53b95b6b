@@ -1,0 +1,561 @@
+---
+title: "Tool System"
+description: "Built-in tools for file operations, bash execution, and web search in Loom AI coding agent"
+---
+
+# Tool System
+
+Loom's tool system provides AI agents with capabilities to interact with the development environment through structured JSON schemas. Tools are implemented in `loom-cli-tools` and registered at runtime.
+
+## Architecture
+
+```rust
+// Tool trait definition
+#[async_trait]
+pub trait Tool: Send + Sync {
+    fn name(&self) -> &str;
+    fn description(&self) -> &str;
+    fn input_schema(&self) -> serde_json::Value;
+    async fn invoke(
+        &self,
+        args: serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<serde_json::Value, ToolError>;
+}
+```
+
+**Key components:**
+- `ToolRegistry`: Central registry for all available tools
+- `ToolContext`: Execution context (workspace root, environment)
+- `ToolDefinition`: JSON schema for LLM consumption
+- `ToolExecutionOutcome`: Result type (success or error)
+
+## Tool Registration
+
+Tools are registered during CLI initialization:
+
+```rust
+fn create_tool_registry() -> ToolRegistry {
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(ReadFileTool::new()));
+    registry.register(Box::new(ListFilesTool::new()));
+    registry.register(Box::new(EditFileTool::new()));
+    registry.register(Box::new(BashTool::new()));
+    registry.register(Box::new(OracleTool::default()));
+    registry.register(Box::new(WebSearchToolGoogle::default()));
+    registry.register(Box::new(WebSearchToolSerper::default()));
+    registry
+}
+```
+
+## Built-in Tools
+
+### read_file
+
+Read file contents from the workspace.
+
+<ParamField path="path" type="string" required>
+  Path to file (absolute or relative to workspace)
+</ParamField>
+
+<ParamField path="max_bytes" type="integer">
+  Maximum bytes to read (default: 1MB)
+</ParamField>
+
+**Returns:**
+```json
+{
+  "path": "/workspace/src/main.rs",
+  "contents": "fn main() {...}",
+  "truncated": false
+}
+```
+
+**Features:**
+- Path validation (prevents directory traversal)
+- Workspace boundary enforcement
+- Automatic truncation for large files
+- UTF-8 lossy conversion
+
+<CodeGroup>
+```rust Implementation
+let canonical_path = Self::validate_path(&args.path, &ctx.workspace_root)?;
+let metadata = tokio::fs::metadata(&canonical_path).await?;
+let file_size = metadata.len();
+let truncated = file_size > max_bytes;
+
+let contents = if truncated {
+    let bytes = tokio::fs::read(&canonical_path).await?;
+    String::from_utf8_lossy(&bytes[..max_bytes as usize]).to_string()
+} else {
+    tokio::fs::read_to_string(&canonical_path).await?
+};
+```
+
+```json Tool Definition
+{
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "Path to the file to read (absolute or relative to workspace)"
+    },
+    "max_bytes": {
+      "type": "integer",
+      "description": "Maximum number of bytes to read (default: 1MB)"
+    }
+  },
+  "required": ["path"]
+}
+```
+</CodeGroup>
+
+### edit_file
+
+Apply snippet-based edits to files.
+
+<ParamField path="path" type="string" required>
+  Path to file (created if doesn't exist)
+</ParamField>
+
+<ParamField path="edits" type="array" required>
+  List of edit operations
+  
+  Each edit:
+  - `old_str`: Text to find (empty string for new files)
+  - `new_str`: Replacement text
+  - `replace_all`: Replace all occurrences (default: false)
+</ParamField>
+
+**Returns:**
+```json
+{
+  "path": "/workspace/src/lib.rs",
+  "edits_applied": 3,
+  "original_bytes": 1024,
+  "new_bytes": 1156
+}
+```
+
+**Edit semantics:**
+- Edits applied sequentially
+- If `old_str` is empty: append `new_str` to file (create if needed)
+- If `old_str` found once: replace with `new_str`
+- If `old_str` found multiple times: error (unless `replace_all: true`)
+- If `old_str` not found: error
+
+<CodeGroup>
+```rust Edit Application
+let mut content = if file_path.exists() {
+    tokio::fs::read_to_string(&file_path).await?
+} else {
+    String::new()
+};
+
+let original_bytes = content.len();
+let mut edits_applied = 0;
+
+for edit in &args.edits {
+    if edit.old_str.is_empty() {
+        // New file: append new_str
+        content.push_str(&edit.new_str);
+        edits_applied += 1;
+    } else if edit.replace_all.unwrap_or(false) {
+        // Replace all occurrences
+        content = content.replace(&edit.old_str, &edit.new_str);
+        edits_applied += 1;
+    } else {
+        // Replace single occurrence
+        let count = content.matches(&edit.old_str).count();
+        match count {
+            0 => return Err(ToolError::InvalidArguments(
+                format!("old_str not found: {}", edit.old_str)
+            )),
+            1 => {
+                content = content.replacen(&edit.old_str, &edit.new_str, 1);
+                edits_applied += 1;
+            }
+            _ => return Err(ToolError::InvalidArguments(
+                format!("old_str found {} times, use replace_all", count)
+            )),
+        }
+    }
+}
+
+tokio::fs::write(&file_path, content.as_bytes()).await?;
+```
+
+```json Example Usage
+{
+  "path": "src/auth.rs",
+  "edits": [
+    {
+      "old_str": "fn login() {\n    todo!()\n}",
+      "new_str": "fn login() {\n    authenticate_user()\n}"
+    },
+    {
+      "old_str": "// TODO: add error handling",
+      "new_str": "// Error handling implemented",
+      "replace_all": true
+    }
+  ]
+}
+```
+</CodeGroup>
+
+### bash
+
+Execute shell commands in the workspace.
+
+<ParamField path="command" type="string" required>
+  Shell command to execute
+</ParamField>
+
+<ParamField path="cwd" type="string">
+  Working directory (relative to workspace, default: workspace root)
+</ParamField>
+
+<ParamField path="timeout_secs" type="integer">
+  Timeout in seconds (default: 60, max: 300)
+</ParamField>
+
+**Returns:**
+```json
+{
+  "exit_code": 0,
+  "stdout": "test output\n",
+  "stderr": "",
+  "timed_out": false,
+  "truncated": false
+}
+```
+
+**Features:**
+- Runs commands via `sh -c`
+- Respects workspace boundaries (cwd validation)
+- Automatic timeout (prevents hanging)
+- Output truncation (256KB per stream)
+- Captures both stdout and stderr
+
+<CodeGroup>
+```rust Command Execution
+let mut cmd = Command::new("sh");
+cmd.arg("-c").arg(&args.command).current_dir(&working_dir);
+
+let result = timeout(Duration::from_secs(timeout_secs), cmd.output()).await;
+
+let (exit_code, stdout, stderr, timed_out, truncated) = match result {
+    Ok(Ok(output)) => {
+        let (stdout, stdout_truncated) = Self::truncate_output(&output.stdout, MAX_OUTPUT_BYTES);
+        let (stderr, stderr_truncated) = Self::truncate_output(&output.stderr, MAX_OUTPUT_BYTES);
+        (output.status.code(), stdout, stderr, false, stdout_truncated || stderr_truncated)
+    }
+    Ok(Err(e)) => return Err(ToolError::Io(e.to_string())),
+    Err(_) => (None, String::new(), String::new(), true, false),
+};
+```
+
+```json Security Example
+{
+  "command": "pwd",
+  "cwd": "../../../etc"  // REJECTED: outside workspace
+}
+
+// Error: PathOutsideWorkspace
+```
+</CodeGroup>
+
+<Warning>
+  The bash tool can execute arbitrary commands. Always validate inputs and enforce workspace boundaries.
+</Warning>
+
+### list_files
+
+List files in a directory (glob-like functionality).
+
+<ParamField path="path" type="string">
+  Directory path (default: workspace root)
+</ParamField>
+
+<ParamField path="recursive" type="boolean">
+  List files recursively (default: false)
+</ParamField>
+
+<ParamField path="max_depth" type="integer">
+  Maximum recursion depth (default: 10)
+</ParamField>
+
+**Returns:**
+```json
+{
+  "files": [
+    {
+      "path": "src/main.rs",
+      "size": 1024,
+      "is_dir": false
+    },
+    {
+      "path": "Cargo.toml",
+      "size": 512,
+      "is_dir": false
+    }
+  ]
+}
+```
+
+### web_search
+
+Perform web searches via Loom server proxy.
+
+<ParamField path="query" type="string" required>
+  Search query in natural language
+</ParamField>
+
+<ParamField path="max_results" type="integer">
+  Maximum results (default: 5, max: 10)
+</ParamField>
+
+**Implementation:**
+Proxies to server endpoint: `POST /proxy/cse`
+
+**Providers:**
+- `WebSearchToolGoogle`: Google Custom Search Engine
+- `WebSearchToolSerper`: Serper.dev API
+
+<Note>
+  Web search requires API keys configured on the server. The tool automatically retries on transient failures using exponential backoff.
+</Note>
+
+### oracle
+
+Reserved for future use (AI model introspection).
+
+## Tool Context
+
+Every tool receives a `ToolContext` with:
+
+```rust
+pub struct ToolContext {
+    pub workspace_root: PathBuf,
+    // Future: environment variables, user info, etc.
+}
+```
+
+**Usage:**
+```rust
+let ctx = ToolContext::new(&workspace_path);
+let result = tool.invoke(args, &ctx).await?;
+```
+
+## Error Handling
+
+Tools return `Result<serde_json::Value, ToolError>`:
+
+```rust
+pub enum ToolError {
+    FileNotFound(PathBuf),
+    PathOutsideWorkspace(PathBuf),
+    InvalidArguments(String),
+    Io(String),
+    Serialization(String),
+    NotFound(String),
+    // ... other variants
+}
+```
+
+**Error propagation:**
+
+<Steps>
+  <Step title="Tool returns error">
+    ```rust
+    Err(ToolError::FileNotFound(path))
+    ```
+  </Step>
+
+  <Step title="Executor wraps error">
+    ```rust
+    ToolExecutionOutcome::Error {
+        call_id: tool_call.id.clone(),
+        error: e,
+    }
+    ```
+  </Step>
+
+  <Step title="Error sent to LLM">
+    ```json
+    {
+      "role": "tool",
+      "tool_call_id": "call_123",
+      "content": "Error: File not found: /workspace/missing.txt"
+    }
+    ```
+  </Step>
+
+  <Step title="LLM retries or adapts">
+    The agent can correct the path or try a different approach.
+  </Step>
+</Steps>
+
+## Security
+
+### Path Validation
+
+All file tools validate paths:
+
+```rust
+fn validate_path(path: &PathBuf, workspace_root: &Path) -> Result<PathBuf, ToolError> {
+    let absolute_path = if path.is_absolute() {
+        path.clone()
+    } else {
+        workspace_root.join(path)
+    };
+
+    let canonical = absolute_path.canonicalize()
+        .map_err(|_| ToolError::FileNotFound(absolute_path.clone()))?;
+
+    let workspace_canonical = workspace_root.canonicalize()
+        .map_err(|_| ToolError::FileNotFound(workspace_root.to_path_buf()))?;
+
+    if !canonical.starts_with(&workspace_canonical) {
+        return Err(ToolError::PathOutsideWorkspace(canonical));
+    }
+
+    Ok(canonical)
+}
+```
+
+**Prevents:**
+- Directory traversal (`../../../etc/passwd`)
+- Absolute paths outside workspace (`/etc/shadow`)
+- Symlink escape (via `canonicalize()`)
+
+### Bash Sandboxing
+
+- Commands run in workspace subdirectory
+- No network access (unless container allows)
+- Timeout prevents infinite loops
+- Output truncation prevents memory exhaustion
+
+### Resource Limits
+
+| Tool | Limit | Rationale |
+|------|-------|----------|
+| `read_file` | 1 MB | Prevent memory overflow |
+| `bash` stdout/stderr | 256 KB each | Prevent log spam |
+| `bash` timeout | 300s max | Prevent hanging processes |
+| `list_files` depth | 10 levels | Prevent infinite recursion |
+
+## Testing
+
+Loom tools use property-based testing with `proptest`:
+
+```rust
+proptest! {
+    #[test]
+    fn roundtrip_file_content(content in "[a-zA-Z0-9 \n]{0,1000}") {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let workspace = setup_workspace();
+            let file_path = workspace.path().join("test.txt");
+            std::fs::write(&file_path, &content).unwrap();
+
+            let tool = ReadFileTool::new();
+            let ctx = ToolContext::new(workspace.path().to_path_buf());
+
+            let result = tool
+                .invoke(serde_json::json!({"path": "test.txt"}), &ctx)
+                .await
+                .unwrap();
+
+            prop_assert_eq!(result["contents"].as_str().unwrap(), content);
+            Ok(())
+        }).unwrap();
+    }
+}
+```
+
+**Test coverage:**
+- Path validation (traversal, absolute, symlinks)
+- Content preservation (UTF-8, truncation)
+- Error conditions (not found, permissions)
+- Edge cases (empty files, large files)
+
+## Adding Custom Tools
+
+<Steps>
+  <Step title="Implement the Tool trait">
+    ```rust
+    pub struct MyTool;
+
+    #[async_trait]
+    impl Tool for MyTool {
+        fn name(&self) -> &str { "my_tool" }
+        fn description(&self) -> &str { "Does something useful" }
+        fn input_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "arg1": {"type": "string"}
+                },
+                "required": ["arg1"]
+            })
+        }
+        async fn invoke(&self, args: serde_json::Value, ctx: &ToolContext)
+            -> Result<serde_json::Value, ToolError>
+        {
+            // Implementation
+            Ok(serde_json::json!({"result": "success"}))
+        }
+    }
+    ```
+  </Step>
+
+  <Step title="Register in the registry">
+    ```rust
+    registry.register(Box::new(MyTool));
+    ```
+  </Step>
+
+  <Step title="Write tests">
+    ```rust
+    #[tokio::test]
+    async fn my_tool_works() {
+        let tool = MyTool;
+        let ctx = ToolContext::new(PathBuf::from("/workspace"));
+        let result = tool.invoke(
+            serde_json::json!({"arg1": "test"}),
+            &ctx
+        ).await.unwrap();
+        assert_eq!(result["result"], "success");
+    }
+    ```
+  </Step>
+</Steps>
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Validate all inputs" icon="shield-check">
+    Use schema validation and runtime checks. Never trust LLM-generated arguments.
+  </Card>
+
+  <Card title="Enforce resource limits" icon="gauge-high">
+    Set timeouts, max sizes, and depth limits to prevent abuse.
+  </Card>
+
+  <Card title="Return structured errors" icon="triangle-exclamation">
+    Provide clear error messages the LLM can understand and act on.
+  </Card>
+
+  <Card title="Test with proptest" icon="vial">
+    Use property-based testing to find edge cases.
+  </Card>
+
+  <Card title="Log tool execution" icon="file-lines">
+    Use tracing for debugging: `tracing::debug!("executing tool")`
+  </Card>
+
+  <Card title="Keep tools atomic" icon="atom">
+    One tool = one operation. Compose complex workflows in the agent layer.
+  </Card>
+</CardGroup>

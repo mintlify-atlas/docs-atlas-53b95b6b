@@ -1,0 +1,552 @@
+---
+title: "Session Analytics"
+description: "Track user engagement periods and release health metrics with crash-free rates"
+---
+
+## Overview
+
+Loom's session analytics system tracks user engagement periods to enable release health metrics like crash-free rate and adoption tracking. Uses hybrid storage: individual sessions for recent data (30 days) and hourly aggregates for historical dashboards.
+
+<Note>
+Sessions integrate with [crash tracking](/observability/crash-tracking) for crashed session detection and [analytics](/observability/analytics) for person identity.
+</Note>
+
+## Key Features
+
+- **Session tracking** for web, Node.js, and Rust applications
+- **Release health metrics**: crash-free rate, adoption percentage
+- **Hybrid storage**: individual sessions (30 days) + hourly aggregates (forever)
+- **Sampling support** for high-volume applications
+- **Real-time updates** via SSE for release health changes
+
+## Core Concepts
+
+### Session
+
+A single user engagement period:
+
+```rust
+pub struct Session {
+    pub id: SessionId,
+    pub person_id: Option<PersonId>,
+    pub distinct_id: String,
+    pub status: SessionStatus,
+    pub release: Option<String>,
+    pub environment: String,
+    pub error_count: u32,           // Handled errors
+    pub crash_count: u32,           // Unhandled errors
+    pub crashed: bool,              // crash_count > 0
+    pub started_at: DateTime<Utc>,
+    pub ended_at: Option<DateTime<Utc>>,
+    pub duration_ms: Option<u64>,
+    pub platform: Platform,
+    pub sampled: bool,
+    pub sample_rate: f64,
+}
+```
+
+**Session statuses:**
+
+| Status | Description |
+|--------|-------------|
+| `Active` | Session ongoing |
+| `Exited` | Ended normally (user closed tab, app backgrounded) |
+| `Crashed` | Had at least one unhandled error |
+| `Abnormal` | Ended unexpectedly (no end signal) |
+| `Errored` | Had handled errors but completed normally |
+
+### Platform Types
+
+```rust
+pub enum Platform {
+    JavaScript,  // Browser
+    Node,        // Node.js
+    Rust,
+    Python,
+}
+```
+
+### Release Health
+
+Computed metrics for a release:
+
+```rust
+pub struct ReleaseHealth {
+    pub release: String,
+    pub environment: String,
+    pub total_sessions: u64,
+    pub crashed_sessions: u64,
+    pub total_users: u64,
+    pub crashed_users: u64,
+    pub crash_free_session_rate: f64,   // Percentage
+    pub crash_free_user_rate: f64,      // Percentage
+    pub adoption_rate: f64,             // Percentage
+    pub adoption_stage: AdoptionStage,
+}
+```
+
+**Adoption stages:**
+
+| Stage | Adoption Rate |
+|-------|---------------|
+| `New` | < 5% |
+| `Growing` | 5-50% |
+| `Adopted` | 50-95% |
+| `Replaced` | < 5% (was higher before) |
+
+## Automatic Tracking
+
+Sessions are automatically tracked by the crash SDK:
+
+<Tabs>
+  <Tab title="Rust">
+    ```rust
+    use loom_crash::CrashClient;
+    
+    // Sessions enabled by default
+    let crash = CrashClient::builder()
+        .api_key("loom_crash_xxx")
+        .release(env!("CARGO_PKG_VERSION"))
+        .with_session_tracking(true)   // Default: true
+        .session_sample_rate(1.0)      // Default: 1.0 (100%)
+        .build()?;
+    
+    // Session starts automatically on build()
+    
+    // Errors update session
+    crash.capture_error(&error);  // Increments error_count
+    // Unhandled errors mark as crashed
+    
+    // Session ends on shutdown
+    crash.shutdown().await?;
+    ```
+  </Tab>
+  
+  <Tab title="TypeScript (Browser)">
+    ```typescript
+    import { CrashClient } from '@loom/crash';
+    
+    const crash = new CrashClient({
+      apiKey: 'loom_crash_xxx',
+      release: '1.2.3',
+      
+      // Session options
+      autoSessionTracking: true,      // Default: true
+      sessionSampleRate: 1.0,         // Default: 1.0
+    });
+    
+    // Session starts automatically
+    // Session ends on page unload or manual call
+    crash.endSession();
+    ```
+  </Tab>
+  
+  <Tab title="Node.js">
+    ```typescript
+    import { CrashClient } from '@loom/crash';
+    
+    const crash = new CrashClient({
+      apiKey: 'loom_crash_xxx',
+      release: '1.2.3',
+      autoSessionTracking: true,
+    });
+    
+    // Session starts on init
+    // Session ends on process exit or manual call
+    process.on('SIGTERM', async () => {
+      await crash.endSession();
+      process.exit(0);
+    });
+    ```
+  </Tab>
+</Tabs>
+
+## Session Lifecycle
+
+### Web (Browser)
+
+<Steps>
+  <Step title="Page Load">
+    Session starts when SDK initializes
+  </Step>
+  
+  <Step title="User Activity">
+    Session remains active while user interacts
+  </Step>
+  
+  <Step title="Tab/Window Close">
+    Session ends via `beforeunload` or `pagehide` event
+  </Step>
+  
+  <Step title="Visibility Timeout">
+    If page hidden for 30+ minutes, session ends and new one starts when visible again
+  </Step>
+</Steps>
+
+### Node.js / Rust
+
+<Steps>
+  <Step title="Process Start">
+    Session starts when crash client initializes
+  </Step>
+  
+  <Step title="Process Exit">
+    Session ends normally on clean shutdown
+  </Step>
+  
+  <Step title="Uncaught Exception">
+    Session marked as `Crashed` on unhandled error
+  </Step>
+</Steps>
+
+## Sampling
+
+For high-traffic applications, reduce storage with sampling:
+
+```typescript
+const crash = new CrashClient({
+  apiKey: 'loom_crash_xxx',
+  release: '1.2.3',
+  
+  // Sample 10% of normal sessions
+  sessionSampleRate: 0.1,
+  
+  // Always store crashed sessions (default: true)
+  alwaysStoreCrashed: true,
+});
+```
+
+<Warning>
+**Crashed sessions are always stored** regardless of sample rate. Only successful sessions are sampled.
+</Warning>
+
+### Sampling Rules
+
+1. **Base sample rate** (e.g., 0.1 = 10%)
+2. **Always store crashed** (recommended: true)
+3. Metrics are **automatically adjusted** for sample rate
+
+**Example calculation:**
+```
+Sampled sessions: 1,000
+Crashed sessions: 50 (always stored)
+Sample rate: 0.1 (10%)
+
+Adjusted total = 50 + ((1000 - 50) / 0.1) = 9,550
+Crash-free rate = (9550 - 50) / 9550 = 99.48%
+```
+
+## Release Health Metrics
+
+### Crash-Free Session Rate
+
+Percentage of sessions without unhandled errors:
+
+```
+crash_free_session_rate = 
+  (total_sessions - crashed_sessions) / total_sessions × 100
+```
+
+**Example:**
+- Total sessions: 10,000
+- Crashed sessions: 50
+- Crash-free rate: **99.5%**
+
+### Crash-Free User Rate
+
+Percentage of users who didn't experience crashes:
+
+```
+crash_free_user_rate = 
+  (total_users - crashed_users) / total_users × 100
+```
+
+**Example:**
+- Total users: 1,000
+- Users with crashes: 25
+- Crash-free user rate: **97.5%**
+
+<Note>
+User rate is typically lower than session rate because one user can have multiple sessions.
+</Note>
+
+### Adoption Rate
+
+Percentage of traffic on this release:
+
+```
+adoption_rate = 
+  release_sessions / all_sessions × 100
+```
+
+**Example:**
+- Release 1.2.3 sessions: 7,500
+- All sessions: 10,000
+- Adoption rate: **75%** (Adopted stage)
+
+## API Endpoints
+
+### Session Ingestion (SDK)
+
+<ParamField path="POST /api/sessions/start" type="endpoint">
+  Start a session
+  
+  **Request:**
+  ```json
+  {
+    "session_id": "ses_xxx",
+    "distinct_id": "user_123",
+    "release": "1.2.3",
+    "environment": "production",
+    "platform": "javascript",
+    "started_at": "2026-01-18T12:00:00Z",
+    "sample_rate": 1.0
+  }
+  ```
+</ParamField>
+
+<ParamField path="POST /api/sessions/end" type="endpoint">
+  End a session
+  
+  **Request:**
+  ```json
+  {
+    "session_id": "ses_xxx",
+    "status": "exited",
+    "error_count": 0,
+    "crash_count": 0,
+    "ended_at": "2026-01-18T12:30:00Z",
+    "duration_ms": 1800000
+  }
+  ```
+</ParamField>
+
+### Release Health (User Auth)
+
+<ParamField path="GET /api/projects/:id/releases" type="endpoint">
+  List releases with health metrics
+  
+  **Query Parameters:**
+  - `environment` - Filter by environment
+  - `start_date` - Start of time range
+  - `end_date` - End of time range
+  
+  **Response:**
+  ```json
+  {
+    "releases": [
+      {
+        "release": "1.2.3",
+        "environment": "production",
+        "crash_free_session_rate": 99.5,
+        "crash_free_user_rate": 97.8,
+        "adoption_rate": 75.2,
+        "adoption_stage": "adopted",
+        "total_sessions": 10000,
+        "crashed_sessions": 50,
+        "total_users": 1500
+      }
+    ]
+  }
+  ```
+</ParamField>
+
+<ParamField path="GET /api/projects/:id/releases/:version" type="endpoint">
+  Get detailed health for specific release
+  
+  **Response:**
+  ```json
+  {
+    "release": "1.2.3",
+    "environment": "production",
+    "crash_free_session_rate": 99.5,
+    "crash_free_user_rate": 97.8,
+    "adoption_rate": 75.2,
+    "adoption_stage": "adopted",
+    "total_sessions": 10000,
+    "crashed_sessions": 50,
+    "total_users": 1500,
+    "crashed_users": 33,
+    "first_seen": "2026-01-15T00:00:00Z",
+    "last_seen": "2026-01-18T12:00:00Z",
+    "crash_free_rate_trend": 0.2
+  }
+  ```
+</ParamField>
+
+<ParamField path="GET /api/projects/:id/health/trend" type="endpoint">
+  Get health trend over time
+  
+  **Query Parameters:**
+  - `interval` - `hour`, `day`, `week`
+  - `start_date` - Start timestamp
+  - `end_date` - End timestamp
+  
+  **Response:**
+  ```json
+  {
+    "trend": [
+      {
+        "timestamp": "2026-01-15T00:00:00Z",
+        "crash_free_session_rate": 99.2,
+        "crash_free_user_rate": 97.5,
+        "total_sessions": 2000
+      },
+      {
+        "timestamp": "2026-01-16T00:00:00Z",
+        "crash_free_session_rate": 99.5,
+        "crash_free_user_rate": 97.8,
+        "total_sessions": 2100
+      }
+    ]
+  }
+  ```
+</ParamField>
+
+### Session Queries
+
+<ParamField path="GET /api/projects/:id/sessions" type="endpoint">
+  List recent sessions
+  
+  **Query Parameters:**
+  - `release` - Filter by release
+  - `status` - Filter by status (active, exited, crashed)
+  - `limit` - Max results (default: 100)
+</ParamField>
+
+<ParamField path="GET /api/projects/:id/sessions/:sessionId" type="endpoint">
+  Get session detail
+  
+  **Response:**
+  ```json
+  {
+    "session": {
+      "id": "ses_xxx",
+      "person_id": "per_yyy",
+      "status": "exited",
+      "release": "1.2.3",
+      "environment": "production",
+      "error_count": 2,
+      "crash_count": 0,
+      "duration_ms": 1800000,
+      "platform": "javascript",
+      "started_at": "2026-01-18T12:00:00Z",
+      "ended_at": "2026-01-18T12:30:00Z"
+    }
+  }
+  ```
+</ParamField>
+
+## Real-time Updates (SSE)
+
+Subscribe to release health changes:
+
+```typescript
+const eventSource = new EventSource(
+  'https://loom.example.com/api/projects/proj-123/sessions/stream',
+  { headers: { Authorization: 'Bearer <token>' } }
+);
+
+eventSource.addEventListener('release.health_changed', (event) => {
+  const data = JSON.parse(event.data);
+  console.log(`Release ${data.release}: ${data.crash_free_session_rate}% crash-free`);
+  updateDashboard(data);
+});
+```
+
+**Events:**
+- `session.started` - New session started
+- `session.ended` - Session ended
+- `session.crashed` - Session marked as crashed
+- `release.health_changed` - Release health metrics updated
+
+## Aggregation & Retention
+
+### Storage Strategy
+
+<CardGroup cols={2}>
+  <Card title="Individual Sessions" icon="database">
+    **Retention:** 30 days
+    
+    **Purpose:** Debugging, detailed analysis
+    
+    Full session data with all context
+  </Card>
+  
+  <Card title="Hourly Aggregates" icon="chart-line">
+    **Retention:** Forever
+    
+    **Purpose:** Long-term dashboards, trends
+    
+    Rolled-up counts and statistics
+  </Card>
+</CardGroup>
+
+### Hourly Aggregation
+
+Every hour, individual sessions are aggregated:
+
+```sql
+SELECT
+  release,
+  environment,
+  COUNT(*) as total_sessions,
+  SUM(CASE WHEN status = 'crashed' THEN 1 ELSE 0 END) as crashed_sessions,
+  COUNT(DISTINCT person_id) as unique_users,
+  COUNT(DISTINCT CASE WHEN crashed = 1 THEN person_id END) as crashed_users,
+  AVG(duration_ms) as avg_duration_ms
+FROM sessions
+WHERE started_at >= ? AND started_at < ?
+GROUP BY release, environment
+```
+
+After 30 days, individual sessions are deleted but aggregates remain.
+
+## Metric Definitions
+
+| Metric | Formula | Description |
+|--------|---------|-------------|
+| **Crash-free session rate** | `(total - crashed) / total × 100` | % sessions without unhandled errors |
+| **Crash-free user rate** | `(users - crashed_users) / users × 100` | % users without crashes |
+| **Adoption rate** | `release_sessions / all_sessions × 100` | % traffic on this release |
+| **Error rate** | `errored / total × 100` | % sessions with handled errors |
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Set Release Version" icon="tag">
+    Always set `release` to track health per version
+    
+    Use semantic versioning or commit SHA
+  </Card>
+  
+  <Card title="Use Sampling" icon="percent">
+    For high-traffic apps, sample normal sessions
+    
+    Crashed sessions are always stored
+  </Card>
+  
+  <Card title="Monitor Trends" icon="chart-line">
+    Track crash-free rate trends over time
+    
+    Alert on significant drops
+  </Card>
+  
+  <Card title="Environment Separation" icon="layer-group">
+    Separate production/staging environments
+    
+    Monitor both independently
+  </Card>
+</CardGroup>
+
+## See Also
+
+<CardGroup cols={3}>
+  <Card title="Crash Tracking" icon="bug" href="/observability/crash-tracking">
+    Investigate crashed sessions
+  </Card>
+  
+  <Card title="Analytics" icon="chart-line" href="/observability/analytics">
+    Link sessions to person profiles
+  </Card>
+</CardGroup>

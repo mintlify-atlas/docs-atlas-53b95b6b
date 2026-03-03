@@ -1,0 +1,447 @@
+---
+title: Weaver Management Endpoints
+description: Provision and manage ephemeral Kubernetes pods for remote REPL sessions
+---
+
+## Overview
+
+Weavers are ephemeral Kubernetes pods that run Loom REPL sessions in isolated environments. Each weaver:
+
+- Runs in the `loom-weavers` namespace
+- Has configurable resource limits (CPU, memory)
+- Supports custom container images
+- Auto-expires after a configurable lifetime (default: 24 hours, max: 48 hours)
+- Provides terminal access via WebSocket
+
+**Permissions**: Users can only manage weavers they own. System administrators can manage all weavers. Support users have read-only access.
+
+## Create Weaver
+
+```http
+POST /api/weaver
+```
+
+Provisions a new weaver pod in Kubernetes.
+
+### Request Body
+
+<ParamField body="image" type="string" required>
+  Container image to run (e.g., `"ghcr.io/loom/weaver:latest"`)
+</ParamField>
+
+<ParamField body="org_id" type="string" required>
+  Organization ID (UUID). User must be a member of this organization.
+</ParamField>
+
+<ParamField body="repo_id" type="string" optional>
+  Repository ID for repo-scoped secrets access
+</ParamField>
+
+<ParamField body="env" type="object" default="{}">
+  Environment variables as key-value pairs
+</ParamField>
+
+<ParamField body="resources" type="object" optional>
+  Resource limits:
+  - `memory_limit`: e.g., `"8Gi"`
+  - `cpu_limit`: e.g., `"4"`
+</ParamField>
+
+<ParamField body="tags" type="object" default="{}">
+  User-defined metadata tags for filtering
+</ParamField>
+
+<ParamField body="lifetime_hours" type="integer" optional>
+  Time-to-live in hours (max: 48, default: 24)
+</ParamField>
+
+<ParamField body="command" type="array" optional>
+  Override container ENTRYPOINT
+</ParamField>
+
+<ParamField body="args" type="array" optional>
+  Override container CMD
+</ParamField>
+
+<ParamField body="workdir" type="string" optional>
+  Override container WORKDIR
+</ParamField>
+
+### Response
+
+<ResponseField name="id" type="string">
+  Weaver ID
+</ResponseField>
+
+<ResponseField name="pod_name" type="string">
+  Kubernetes pod name
+</ResponseField>
+
+<ResponseField name="status" type="string">
+  One of: `pending`, `running`, `succeeded`, `failed`, `terminating`
+</ResponseField>
+
+<ResponseField name="created_at" type="string">
+  ISO 8601 timestamp
+</ResponseField>
+
+<ResponseField name="image" type="string">
+  Container image
+</ResponseField>
+
+<ResponseField name="tags" type="object">
+  User-defined tags
+</ResponseField>
+
+<ResponseField name="lifetime_hours" type="integer">
+  Configured lifetime in hours
+</ResponseField>
+
+<ResponseField name="age_hours" type="number">
+  Current age in hours
+</ResponseField>
+
+<ResponseField name="owner_user_id" type="string">
+  Owner's user ID
+</ResponseField>
+
+### Example
+
+```bash
+curl -X POST https://loom.ghuntley.com/api/weaver \
+  -H "Authorization: Bearer loom_sk_..." \
+  -H "Content-Type: application/json" \
+  -d '{
+    "image": "ghcr.io/loom/weaver:latest",
+    "org_id": "550e8400-e29b-41d4-a716-446655440000",
+    "env": {
+      "RUST_LOG": "debug"
+    },
+    "resources": {
+      "memory_limit": "4Gi",
+      "cpu_limit": "2"
+    },
+    "tags": {
+      "project": "ai-worker",
+      "env": "dev"
+    },
+    "lifetime_hours": 12
+  }'
+```
+
+**Response (201 Created)**:
+
+```json
+{
+  "id": "weaver_abc123",
+  "pod_name": "loom-weaver-abc123",
+  "status": "pending",
+  "created_at": "2026-03-03T12:00:00Z",
+  "image": "ghcr.io/loom/weaver:latest",
+  "tags": {
+    "project": "ai-worker",
+    "env": "dev"
+  },
+  "lifetime_hours": 12,
+  "age_hours": 0.0,
+  "owner_user_id": "user_xyz789"
+}
+```
+
+**Error (403 Forbidden)** if user is not an org member:
+
+```json
+{
+  "error": "forbidden",
+  "message": "You are not a member of this organization"
+}
+```
+
+## List Weavers
+
+```http
+GET /api/weavers
+```
+
+Lists weavers. Regular users see only their own weavers. Admins and support see all weavers.
+
+### Query Parameters
+
+<ParamField query="tag" type="string[]" optional>
+  Filter by tags (format: `key:value`). Multiple allowed.
+</ParamField>
+
+### Response
+
+<ResponseField name="weavers" type="array">
+  Array of weaver objects
+</ResponseField>
+
+<ResponseField name="count" type="integer">
+  Number of weavers returned
+</ResponseField>
+
+### Example
+
+```bash
+# List all weavers for current user
+curl -H "Authorization: Bearer loom_sk_..." \
+  https://loom.ghuntley.com/api/weavers
+
+# Filter by tags
+curl -H "Authorization: Bearer loom_sk_..." \
+  "https://loom.ghuntley.com/api/weavers?tag=project:ai-worker&tag=env:prod"
+```
+
+```json
+{
+  "weavers": [
+    {
+      "id": "weaver_abc123",
+      "pod_name": "loom-weaver-abc123",
+      "status": "running",
+      "created_at": "2026-03-03T12:00:00Z",
+      "image": "ghcr.io/loom/weaver:latest",
+      "tags": {
+        "project": "ai-worker",
+        "env": "dev"
+      },
+      "lifetime_hours": 12,
+      "age_hours": 2.5,
+      "owner_user_id": "user_xyz789"
+    }
+  ],
+  "count": 1
+}
+```
+
+## Get Weaver
+
+```http
+GET /api/weaver/{id}
+```
+
+Retrieves details for a specific weaver.
+
+### Path Parameters
+
+<ParamField path="id" type="string" required>
+  Weaver ID
+</ParamField>
+
+### Response
+
+Returns a single weaver object.
+
+### Example
+
+```bash
+curl -H "Authorization: Bearer loom_sk_..." \
+  https://loom.ghuntley.com/api/weaver/weaver_abc123
+```
+
+**Error (403 Forbidden)** if user doesn't have access:
+
+```json
+{
+  "error": "forbidden",
+  "message": "Access denied to this weaver"
+}
+```
+
+## Delete Weaver
+
+```http
+DELETE /api/weaver/{id}
+```
+
+Deletes a weaver pod. Only the owner or system admin can delete.
+
+### Path Parameters
+
+<ParamField path="id" type="string" required>
+  Weaver ID
+</ParamField>
+
+### Response
+
+Returns `204 No Content` on success.
+
+### Example
+
+```bash
+curl -X DELETE -H "Authorization: Bearer loom_sk_..." \
+  https://loom.ghuntley.com/api/weaver/weaver_abc123
+```
+
+**Response**: `204 No Content`
+
+## Stream Weaver Logs
+
+```http
+GET /api/weaver/{id}/logs
+```
+
+Streams logs from the weaver pod via Server-Sent Events (SSE).
+
+### Path Parameters
+
+<ParamField path="id" type="string" required>
+  Weaver ID
+</ParamField>
+
+### Query Parameters
+
+<ParamField query="tail" type="integer" default="256">
+  Number of lines to tail from the end
+</ParamField>
+
+<ParamField query="timestamps" type="boolean" default="true">
+  Include timestamps in log lines
+</ParamField>
+
+### Response
+
+Returns `text/event-stream` with log lines as SSE events.
+
+### Example
+
+```bash
+curl -N -H "Authorization: Bearer loom_sk_..." \
+  "https://loom.ghuntley.com/api/weaver/weaver_abc123/logs?tail=100&timestamps=true"
+```
+
+**Stream output**:
+
+```
+data: 2026-03-03T12:00:00Z Starting Loom REPL...
+
+data: 2026-03-03T12:00:01Z Connecting to LLM provider...
+
+data: 2026-03-03T12:00:02Z Ready for input
+```
+
+## Attach to Weaver Terminal
+
+```http
+WS /api/weaver/{id}/attach
+```
+
+Attaches to the weaver's terminal via WebSocket for interactive I/O.
+
+### Path Parameters
+
+<ParamField path="id" type="string" required>
+  Weaver ID
+</ParamField>
+
+### Authentication
+
+Use a WebSocket token from `/auth/ws-token` in the first message:
+
+```json
+{"type": "auth", "token": "ws_..."}
+```
+
+### Access Levels
+
+- **Full access** (owner or admin): Can send input and receive output
+- **Read-only** (support role): Can only view output
+
+### Example
+
+```javascript
+const ws = new WebSocket('wss://loom.ghuntley.com/api/weaver/weaver_abc123/attach');
+
+ws.onopen = () => {
+  // Authenticate
+  ws.send(JSON.stringify({type: 'auth', token: 'ws_...'}));
+  
+  // Send input (text or binary)
+  ws.send('ls -la\n');
+};
+
+ws.onmessage = (event) => {
+  // Receive output (binary ArrayBuffer)
+  console.log(new TextDecoder().decode(event.data));
+};
+```
+
+**Read-only notice** (for support users):
+
+```
+*** Read-only access: You can view output but cannot send input ***
+```
+
+## Cleanup Expired Weavers
+
+```http
+POST /api/weavers/cleanup
+```
+
+Triggers cleanup of weavers that have exceeded their lifetime. Requires system admin role.
+
+### Query Parameters
+
+<ParamField query="dry_run" type="boolean" default="false">
+  If true, only list weavers that would be deleted without actually deleting them
+</ParamField>
+
+### Response
+
+<ResponseField name="dry_run" type="boolean">
+  Whether this was a dry run
+</ResponseField>
+
+<ResponseField name="deleted" type="string[]" nullable>
+  Weaver IDs that were deleted (null in dry run)
+</ResponseField>
+
+<ResponseField name="would_delete" type="string[]" nullable>
+  Weaver IDs that would be deleted (dry run only)
+</ResponseField>
+
+<ResponseField name="count" type="integer">
+  Number of weavers affected
+</ResponseField>
+
+### Example
+
+```bash
+# Dry run
+curl -X POST -H "Authorization: Bearer loom_sk_..." \
+  "https://loom.ghuntley.com/api/weavers/cleanup?dry_run=true"
+```
+
+```json
+{
+  "dry_run": true,
+  "deleted": null,
+  "would_delete": ["weaver_old123", "weaver_old456"],
+  "count": 2
+}
+```
+
+```bash
+# Actual cleanup
+curl -X POST -H "Authorization: Bearer loom_sk_..." \
+  https://loom.ghuntley.com/api/weavers/cleanup
+```
+
+```json
+{
+  "dry_run": false,
+  "deleted": ["weaver_old123", "weaver_old456"],
+  "would_delete": null,
+  "count": 2
+}
+```
+
+**Error (403 Forbidden)** if not system admin:
+
+```json
+{
+  "error": "forbidden",
+  "message": "System admin access required for cleanup operations"
+}
+```

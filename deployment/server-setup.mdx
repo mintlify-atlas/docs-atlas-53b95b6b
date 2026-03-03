@@ -1,0 +1,364 @@
+---
+title: Server Deployment
+description: Deploy and configure loom-server with NixOS, Docker, or standalone binaries
+---
+
+## Overview
+
+Loom server is the HTTP API server that handles thread persistence, LLM proxy, authentication, and weaver provisioning. It can be deployed using NixOS (recommended), Docker, or as a standalone binary.
+
+## Deployment Methods
+
+<CardGroup cols={3}>
+  <Card title="NixOS" icon="snowflake" href="#nixos-deployment">
+    Production-ready with auto-updates
+  </Card>
+  <Card title="Docker" icon="docker" href="#docker-deployment">
+    Containerized deployment
+  </Card>
+  <Card title="Binary" icon="terminal" href="#standalone-binary">
+    Manual installation
+  </Card>
+</CardGroup>
+
+## NixOS Deployment
+
+<Note>
+The production Loom server runs on NixOS with automatic git-based deployments. Pushing to `trunk` triggers a rebuild within 10 seconds.
+</Note>
+
+### Installation
+
+<Steps>
+  <Step title="Import the Loom server module">
+    Add to your NixOS configuration:
+
+    ```nix configuration.nix
+    { config, pkgs, ... }:
+    {
+      imports = [
+        ./loom-server.nix  # Import from infra/nixos-modules/loom-server.nix
+      ];
+    }
+    ```
+  </Step>
+
+  <Step title="Enable and configure the service">
+    ```nix configuration.nix
+    services.loom-server = {
+      enable = true;
+      package = pkgs.loom-server;
+      
+      # Network configuration
+      host = "0.0.0.0";
+      port = 8080;
+      baseUrl = "https://loom.example.com";
+      
+      # Database
+      databasePath = "/var/lib/loom-server/loom.db";
+      
+      # Logging
+      logLevel = "info";
+      defaultLocale = "en";
+    };
+    ```
+  </Step>
+
+  <Step title="Configure LLM providers">
+    Enable at least one LLM provider:
+
+    ```nix configuration.nix
+    services.loom-server.anthropic = {
+      enable = true;
+      apiKeyFile = "/run/secrets/anthropic-api-key";
+      model = "claude-sonnet-4-20250514";
+    };
+    
+    services.loom-server.openai = {
+      enable = true;
+      apiKeyFile = "/run/secrets/openai-api-key";
+      model = "gpt-4o";
+    };
+    ```
+
+    <Warning>
+    API keys are loaded from files, not inline values. Store keys in `/run/secrets/` using `agenix` or `sops-nix`.
+    </Warning>
+  </Step>
+
+  <Step title="Deploy the configuration">
+    ```bash
+    sudo nixos-rebuild switch
+    ```
+  </Step>
+
+  <Step title="Verify the service is running">
+    ```bash
+    sudo systemctl status loom-server
+    curl http://localhost:8080/health
+    ```
+  </Step>
+</Steps>
+
+### Auto-Update Service
+
+The production deployment uses `nixos-auto-update.service` for automatic deployments:
+
+```nix nixos-auto-update.nix
+services.nixos-auto-update = {
+  enable = true;
+  repoUrl = "https://github.com/your-org/loom";
+  branch = "trunk";
+  interval = "10s";  # Check for updates every 10 seconds
+};
+```
+
+**Monitoring deployments:**
+
+<CodeGroup>
+```bash View logs
+sudo journalctl -u nixos-auto-update.service -f
+```
+
+```bash Check status
+sudo systemctl status nixos-auto-update.service
+```
+
+```bash Check deployed revision
+cat /var/lib/nixos-auto-update/deployed-revision
+```
+
+```bash Force rebuild
+sudo rm /var/lib/nixos-auto-update/deployed-revision
+sudo systemctl start nixos-auto-update.service
+```
+</CodeGroup>
+
+## Docker Deployment
+
+Loom provides a multi-stage Dockerfile that builds both the Rust server and Svelte web UI.
+
+### Building the Image
+
+```bash
+cd /path/to/loom
+docker build -f docker/Dockerfile -t loom-server:latest .
+```
+
+### Running the Container
+
+```bash
+docker run -d \
+  --name loom-server \
+  -p 8080:8080 \
+  -v loom-data:/var/lib/loom \
+  -e LOOM_SERVER_HOST=0.0.0.0 \
+  -e LOOM_SERVER_PORT=8080 \
+  -e LOOM_SERVER_DATABASE_URL=sqlite:/var/lib/loom/loom.db \
+  -e LOOM_SERVER_ANTHROPIC_API_KEY=sk-... \
+  -e LOOM_SERVER_ANTHROPIC_MODEL=claude-sonnet-4-20250514 \
+  loom-server:latest
+```
+
+### Docker Compose
+
+```yaml docker-compose.yml
+version: '3.8'
+
+services:
+  loom-server:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    ports:
+      - "8080:8080"
+    volumes:
+      - loom-data:/var/lib/loom
+    environment:
+      LOOM_SERVER_HOST: 0.0.0.0
+      LOOM_SERVER_PORT: 8080
+      LOOM_SERVER_DATABASE_URL: sqlite:/var/lib/loom/loom.db
+      LOOM_SERVER_BASE_URL: https://loom.example.com
+      LOOM_SERVER_ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      LOOM_SERVER_ANTHROPIC_MODEL: claude-sonnet-4-20250514
+      RUST_LOG: info
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  loom-data:
+```
+
+## Standalone Binary
+
+### Building from Source
+
+<Steps>
+  <Step title="Install Rust toolchain">
+    ```bash
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+    rustup default stable
+    ```
+  </Step>
+
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/your-org/loom.git
+    cd loom
+    ```
+  </Step>
+
+  <Step title="Build loom-server">
+    ```bash
+    cargo build --release --package loom-server
+    ```
+
+    The binary will be at `./target/release/loom-server`
+  </Step>
+
+  <Step title="Run the server">
+    ```bash
+    export LOOM_SERVER_HOST=127.0.0.1
+    export LOOM_SERVER_PORT=8080
+    export LOOM_SERVER_DATABASE_URL=sqlite:loom.db
+    export LOOM_SERVER_ANTHROPIC_API_KEY=sk-...
+    
+    ./target/release/loom-server
+    ```
+  </Step>
+</Steps>
+
+### Using Nix
+
+Build with Nix for reproducible binaries:
+
+```bash
+# Build server binary
+nix build .#loom-server-c2n
+./result/bin/loom-server --version
+
+# Build Docker image
+nix build .#loom-server-image
+docker load < result
+```
+
+## Health Checks
+
+The server provides a `/health` endpoint for monitoring:
+
+```bash
+curl http://localhost:8080/health
+```
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "version": "0.1.0",
+  "database": "connected",
+  "uptime_seconds": 12345
+}
+```
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Server fails to start">
+    **Check the logs:**
+    ```bash
+    # NixOS
+    sudo journalctl -u loom-server -n 100
+    
+    # Docker
+    docker logs loom-server
+    
+    # Standalone
+    # Logs go to stdout - check your terminal or systemd journal
+    ```
+
+    **Common issues:**
+    - Database file permissions
+    - Port already in use (check with `ss -tlnp | grep :8080`)
+    - Missing API keys
+    - Invalid database path
+  </Accordion>
+
+  <Accordion title="Database migrations fail">
+    Migrations run automatically on startup. If they fail:
+
+    1. Check database file permissions
+    2. Ensure the directory exists and is writable
+    3. Check disk space
+    4. Review migration logs for specific errors
+
+    **Force migration retry:**
+    ```bash
+    # Stop the server
+    sudo systemctl stop loom-server
+    
+    # Backup the database
+    cp /var/lib/loom-server/loom.db /var/lib/loom-server/loom.db.backup
+    
+    # Restart the server (migrations run on startup)
+    sudo systemctl start loom-server
+    ```
+  </Accordion>
+
+  <Accordion title="Port binding errors">
+    If you see `Address already in use` errors:
+
+    ```bash
+    # Find what's using the port
+    sudo ss -tlnp | grep :8080
+    
+    # Kill the process
+    sudo kill <pid>
+    
+    # Or use a different port
+    export LOOM_SERVER_PORT=9090
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Security Hardening
+
+The NixOS module includes security hardening via systemd:
+
+```nix
+serviceConfig = {
+  NoNewPrivileges = true;
+  ProtectSystem = "strict";
+  ProtectHome = true;
+  PrivateTmp = true;
+  PrivateDevices = true;
+  ProtectKernelTunables = true;
+  ProtectKernelModules = true;
+  ProtectControlGroups = true;
+  RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" ];
+  RestrictNamespaces = true;
+  MemoryDenyWriteExecute = true;
+  SystemCallFilter = [ "@system-service" "~@privileged" ];
+};
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Configure Environment Variables" icon="gear" href="/deployment/configuration">
+    Complete configuration reference
+  </Card>
+  <Card title="Setup Kubernetes for Weavers" icon="dharmachakra" href="/deployment/kubernetes">
+    Deploy weaver execution environments
+  </Card>
+  <Card title="Database Migrations" icon="database" href="/deployment/database">
+    Manage schema changes
+  </Card>
+  <Card title="Authentication" icon="lock" href="/auth/overview">
+    Configure OAuth and SSO
+  </Card>
+</CardGroup>

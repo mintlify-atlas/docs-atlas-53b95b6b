@@ -1,0 +1,403 @@
+---
+title: REPL Commands
+description: Interactive AI coding assistant REPL with tool-calling capabilities
+---
+
+## Overview
+
+The Loom REPL (Read-Eval-Print Loop) provides an interactive conversation interface with an AI coding agent. The agent has access to tools for reading, editing, and executing code in your workspace.
+
+## Starting a REPL Session
+
+```bash
+# Start new session
+loom
+
+# Start with specific workspace
+loom --workspace /path/to/project
+
+# Start with specific provider
+loom --provider openai
+
+# Start private (local-only) session
+loom private
+```
+
+## REPL Interface
+
+When you start a session, you'll see:
+
+```
+Welcome to Loom! Type your request and press Enter.
+Thread ID: 01HX2K3M4N5P6Q7R8S9T0V1W2X3Y4Z5A6B7C8D9E
+Type your message or press Ctrl+C to exit.
+
+> 
+```
+
+### Interaction Flow
+
+1. **User Input**: Type your request in natural language
+2. **Agent Response**: The AI agent responds with text and/or tool calls
+3. **Tool Execution**: Tools are executed automatically (bash, file edits, etc.)
+4. **Agent Continuation**: Agent receives tool results and continues
+5. **Repeat**: Conversation continues until you exit (Ctrl+C or EOF)
+
+## Available Tools
+
+The agent has access to the following tools:
+
+### read_file
+
+Read the contents of a file from the workspace.
+
+<ParamField path="path" type="string" required>
+  Path to the file to read (absolute or relative to workspace)
+</ParamField>
+
+<ParamField path="max_bytes" type="integer" default={1048576}>
+  Maximum number of bytes to read (default: 1MB)
+</ParamField>
+
+**Example Usage:**
+```
+> Show me the contents of src/main.rs
+```
+
+The agent will use `read_file` to retrieve and display the file contents.
+
+### edit_file
+
+Edit a file by replacing text snippets.
+
+<ParamField path="path" type="string" required>
+  Path to the file to edit
+</ParamField>
+
+<ParamField path="edits" type="array" required>
+  Array of edit operations to apply
+</ParamField>
+
+**Edit Operation:**
+<ParamField path="edits[].old_str" type="string" required>
+  Text to find and replace
+</ParamField>
+
+<ParamField path="edits[].new_str" type="string" required>
+  Replacement text
+</ParamField>
+
+<ParamField path="edits[].replace_all" type="boolean" default={false}>
+  Replace all occurrences (default: false - fails if multiple matches)
+</ParamField>
+
+**Example Usage:**
+```
+> Change the function name from "processData" to "handleData" in src/lib.rs
+```
+
+The agent will use `edit_file` to perform the text replacement.
+
+### list_files
+
+List files in a directory with optional glob patterns.
+
+<ParamField path="path" type="string">
+  Directory path (defaults to workspace root)
+</ParamField>
+
+<ParamField path="pattern" type="string">
+  Glob pattern to filter files (e.g., "*.rs", "src/**/*.ts")
+</ParamField>
+
+<ParamField path="recursive" type="boolean" default={false}>
+  List files recursively
+</ParamField>
+
+**Example Usage:**
+```
+> List all Rust files in the src directory
+```
+
+### bash
+
+Execute shell commands in the workspace directory.
+
+<ParamField path="command" type="string" required>
+  Shell command to execute
+</ParamField>
+
+<ParamField path="cwd" type="string">
+  Working directory (relative to workspace root)
+</ParamField>
+
+<ParamField path="timeout_secs" type="integer" default={60}>
+  Command timeout in seconds (max: 300)
+</ParamField>
+
+**Limits:**
+- Default timeout: 60 seconds
+- Maximum timeout: 300 seconds (5 minutes)
+- Maximum output: 256KB per stream (stdout/stderr)
+
+**Example Usage:**
+```
+> Run the tests
+> Check the git status
+> Build the project with cargo
+```
+
+The agent will use `bash` to execute the appropriate commands.
+
+<Warning>
+  Commands are executed with the same permissions as the CLI process. Be cautious when running destructive operations.
+</Warning>
+
+### oracle
+
+Think step-by-step and reason about complex problems.
+
+<ParamField path="question" type="string" required>
+  Question or problem to reason about
+</ParamField>
+
+<ParamField path="context" type="string">
+  Additional context for reasoning
+</ParamField>
+
+**Example Usage:**
+```
+> Help me design the architecture for a new feature that handles real-time notifications
+```
+
+### web_search
+
+Search the web using Google or Serper.
+
+<ParamField path="query" type="string" required>
+  Search query
+</ParamField>
+
+<ParamField path="num_results" type="integer" default={5}>
+  Number of results to return
+</ParamField>
+
+**Example Usage:**
+```
+> Search for best practices for Rust async programming
+```
+
+<Note>
+  Web search requires API keys configured on the server.
+</Note>
+
+## Auto-Commit
+
+Loom includes an intelligent auto-commit feature that automatically creates git commits when you make changes through the agent.
+
+### How It Works
+
+1. **Trigger**: Activated after `edit_file` or `bash` tool calls
+2. **Analysis**: Analyzes the git diff to understand changes
+3. **Message Generation**: Uses Claude Haiku to generate descriptive commit messages
+4. **Commit**: Creates a git commit with the generated message
+
+### Configuration
+
+**Disable Auto-Commit:**
+```bash
+export LOOM_AUTO_COMMIT_DISABLE=true
+loom
+```
+
+**Default Settings:**
+- Model: `claude-3-haiku-20240307`
+- Max diff size: 32KB
+- Trigger tools: `edit_file`, `bash`
+
+**Example Output:**
+```
+> Fix the authentication bug in src/auth.rs
+
+[Agent makes edits]
+
+[Auto-commit: Fix authentication bug by adding null check]
+```
+
+## Thread State
+
+Each REPL session maintains a conversation thread with:
+
+### Metadata
+- **Thread ID**: Unique identifier
+- **Workspace root**: Working directory path
+- **Current directory**: Process working directory
+- **Loom version**: CLI version used
+- **Provider**: LLM provider (anthropic/openai)
+- **Model**: Specific model identifier
+
+### Git State
+- **Repository URL**: Remote repository slug
+- **Initial branch**: Branch when session started
+- **Current branch**: Current branch
+- **Initial commit SHA**: Starting commit hash
+- **Current commit SHA**: Latest commit hash
+- **Commit history**: List of commits made during session
+- **Start dirty**: Whether workspace had uncommitted changes at start
+- **End dirty**: Current uncommitted changes status
+
+### Conversation
+- **Messages**: Complete conversation history
+- **Tool calls**: All tool invocations and results
+- **Agent state**: Current agent status (waiting, processing, error)
+
+## Session Persistence
+
+Threads are automatically saved to:
+- **Local**: `~/.local/share/loom/threads/` (or XDG data directory)
+- **Remote**: Synced to server (unless private session)
+
+### Resume Behavior
+
+When you resume a thread:
+1. Conversation history is restored
+2. Git state is updated to current workspace
+3. Agent continues from where it left off
+4. Previous context is available to the agent
+
+## Keyboard Controls
+
+<ParamField path="Ctrl+C" type="keyboard">
+  Gracefully save thread and exit
+</ParamField>
+
+<ParamField path="Ctrl+D (EOF)" type="keyboard">
+  Save thread and exit (same as Ctrl+C)
+</ParamField>
+
+<ParamField path="Enter" type="keyboard">
+  Submit message (empty lines are ignored)
+</ParamField>
+
+## Example Session
+
+```bash
+$ loom --workspace ~/projects/myapp
+
+Welcome to Loom! Type your request and press Enter.
+Thread ID: 01HX2K3M4N5P6Q7R8S9T0V1W2X3Y4Z5A6B7C8D9E
+Type your message or press Ctrl+C to exit.
+
+> Show me the main.rs file
+
+[Agent reads src/main.rs using read_file tool]
+
+Here's the content of src/main.rs:
+
+```rust
+fn main() {
+    println!("Hello, world!");
+}
+```
+
+> Change the message to "Hello, Loom!"
+
+[Agent uses edit_file tool to replace the string]
+
+I've updated the message to "Hello, Loom!".
+
+[Auto-commit: Update greeting message to "Hello, Loom!"]
+
+> Run the program
+
+[Agent uses bash tool to execute: cargo run]
+
+   Compiling myapp v0.1.0
+    Finished dev [unoptimized + debuginfo] target(s) in 0.5s
+     Running `target/debug/myapp`
+Hello, Loom!
+
+The program ran successfully and printed "Hello, Loom!".
+
+> ^C
+Thread saved. Goodbye!
+```
+
+## Logging
+
+Control REPL logging with flags:
+
+```bash
+# Debug logging
+loom --log-level debug
+
+# JSON logs
+loom --json-logs
+
+# Combined
+loom --log-level trace --json-logs
+```
+
+Log levels: `trace`, `debug`, `info`, `warn`, `error`
+
+Log formats: `pretty` (default), `compact`, `json`
+
+## Internationalization
+
+REPL messages are localized based on system locale:
+
+**Supported Languages:**
+- English (en)
+- Spanish (es) 
+- Arabic (ar) - RTL support
+
+Locale is detected automatically from:
+1. System locale (`sys-locale` crate)
+2. Falls back to English if unsupported
+
+## Troubleshooting
+
+### Connection Issues
+
+```bash
+# Verify server connectivity
+curl https://loom.ghuntley.com/health
+
+# Check authentication
+loom --server-url https://loom.ghuntley.com login
+```
+
+### Thread Not Syncing
+
+For private sessions:
+```
+Thread <id> is a local-only private session and cannot be shared.
+Start a normal session if you want to sync to the server.
+```
+
+Solution: Use `loom` instead of `loom private` for synced sessions.
+
+### Tool Execution Errors
+
+**File not found:**
+- Verify the file exists in your workspace
+- Check path is relative to workspace root or absolute
+
+**Path outside workspace:**
+- Tools are restricted to workspace directory
+- Use `--workspace` flag to set correct workspace
+
+**Command timeout:**
+- Increase timeout with `timeout_secs` parameter
+- Maximum timeout is 300 seconds
+
+## Related Pages
+
+<CardGroup cols={2}>
+  <Card title="CLI Overview" icon="terminal" href="/cli/overview">
+    Main CLI commands and configuration
+  </Card>
+  <Card title="Weaver Management" icon="cube" href="/cli/weaver">
+    Remote container sessions
+  </Card>
+</CardGroup>

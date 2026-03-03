@@ -1,0 +1,561 @@
+---
+title: "Cron Monitoring"
+description: "Monitor scheduled jobs and background tasks with missed run detection and timeout alerts"
+---
+
+## Overview
+
+Loom's cron monitoring system tracks scheduled jobs, background tasks, and cron jobs to detect missed runs, failures, and performance degradation. Supports both simple ping-based monitoring (like Healthchecks.io) and SDK-based check-ins (like Sentry Crons).
+
+<Note>
+Cron monitoring integrates with [crash tracking](/observability/crash-tracking) to link failed check-ins to crash events.
+</Note>
+
+## Key Features
+
+- **Dual integration**: Simple HTTP pings for shell scripts, SDK for application code
+- **Missed run detection** with configurable grace periods
+- **Timeout detection** for long-running jobs
+- **Schedule support** for cron expressions and fixed intervals
+- **Real-time alerts** via SSE streaming
+
+## Core Concepts
+
+### Monitor
+
+A monitored job or scheduled task:
+
+```rust
+pub struct Monitor {
+    pub id: MonitorId,
+    pub slug: String,                  // "daily-cleanup"
+    pub name: String,                  // "Daily Cleanup Job"
+    pub status: MonitorStatus,
+    pub health: MonitorHealth,
+    pub schedule: MonitorSchedule,
+    pub timezone: String,              // "America/New_York"
+    pub checkin_margin_minutes: u32,   // Grace period (default: 5)
+    pub max_runtime_minutes: Option<u32>,
+    pub ping_key: String,              // UUID for /ping/{key}
+}
+```
+
+**Monitor statuses:**
+
+| Status | Description |
+|--------|-------------|
+| `Active` | Monitoring enabled |
+| `Paused` | Temporarily disabled (won't alert) |
+| `Disabled` | Fully disabled |
+
+**Monitor health:**
+
+| Health | Description |
+|--------|-------------|
+| `Healthy` | Recent check-in was OK |
+| `Failing` | Recent check-in was Error |
+| `Missed` | Expected check-in didn't arrive |
+| `Timeout` | Job exceeded max_runtime |
+| `Unknown` | No check-ins yet |
+
+### Check-in
+
+A single job execution report:
+
+```rust
+pub struct CheckIn {
+    pub id: CheckInId,
+    pub monitor_id: MonitorId,
+    pub status: CheckInStatus,
+    pub started_at: Option<DateTime<Utc>>,
+    pub finished_at: DateTime<Utc>,
+    pub duration_ms: Option<u64>,
+    pub exit_code: Option<i32>,
+    pub output: Option<String>,       // Max 10KB
+    pub source: CheckInSource,
+}
+```
+
+**Check-in statuses:**
+
+| Status | Description |
+|--------|-------------|
+| `InProgress` | Job started, not finished |
+| `Ok` | Completed successfully |
+| `Error` | Failed (explicit error) |
+| `Missed` | System-generated (didn't arrive) |
+| `Timeout` | System-generated (max_runtime exceeded) |
+
+### Schedule Types
+
+```rust
+pub enum MonitorSchedule {
+    // Cron expression: "0 0 * * *" (daily at midnight)
+    Cron { expression: String },
+    
+    // Fixed interval: every 30 minutes
+    Interval { minutes: u32 },
+}
+```
+
+## Ping-Based Monitoring
+
+For shell scripts and simple integrations:
+
+### Simple Ping URLs
+
+```bash
+# Success ping (job completed OK)
+curl https://loom.example.com/ping/abc123-def456
+
+# Start ping (job starting)
+curl https://loom.example.com/ping/abc123-def456/start
+
+# Fail ping (job failed)
+curl https://loom.example.com/ping/abc123-def456/fail
+
+# Ping with exit code
+curl "https://loom.example.com/ping/abc123-def456?exit_code=1"
+
+# Ping with output (POST)
+curl -X POST https://loom.example.com/ping/abc123-def456 \
+  -d "Job completed. Processed 1000 records."
+```
+
+### Shell Script Integration
+
+<Tabs>
+  <Tab title="Simple">
+    ```bash
+    #!/bin/bash
+    set -e
+    
+    # Run job
+    /usr/local/bin/my-script.sh
+    
+    # Success ping
+    curl -fsS https://loom.example.com/ping/xxx
+    ```
+  </Tab>
+  
+  <Tab title="With Error Handling">
+    ```bash
+    #!/bin/bash
+    set -e
+    
+    # Signal start
+    curl -fsS https://loom.example.com/ping/xxx/start
+    
+    # Run job
+    if /usr/local/bin/my-script.sh 2>&1 | tee /tmp/job-output.txt; then
+        # Success
+        curl -fsS -X POST https://loom.example.com/ping/xxx \
+            -d @/tmp/job-output.txt
+    else
+        # Failure
+        curl -fsS -X POST "https://loom.example.com/ping/xxx/fail?exit_code=$?" \
+            -d @/tmp/job-output.txt
+    fi
+    ```
+  </Tab>
+  
+  <Tab title="Kubernetes CronJob">
+    ```yaml
+    apiVersion: batch/v1
+    kind: CronJob
+    metadata:
+      name: daily-cleanup
+    spec:
+      schedule: "0 0 * * *"
+      jobTemplate:
+        spec:
+          template:
+            spec:
+              containers:
+              - name: cleanup
+                image: my-app:latest
+                command:
+                - /bin/sh
+                - -c
+                - |
+                  curl -fsS https://loom.example.com/ping/xxx/start
+                  if /app/cleanup.sh; then
+                    curl -fsS https://loom.example.com/ping/xxx
+                  else
+                    curl -fsS https://loom.example.com/ping/xxx/fail
+                  fi
+              restartPolicy: OnFailure
+    ```
+  </Tab>
+</Tabs>
+
+## SDK-Based Monitoring
+
+For application code:
+
+### Rust SDK
+
+```toml
+[dependencies]
+loom-crons = { version = "0.1" }
+loom-crash = { version = "0.1" }  # Optional
+```
+
+```rust
+use loom_crons::{CronsClient, CheckInOk, CheckInError};
+
+// Initialize
+let crons = CronsClient::builder()
+    .api_key("loom_crons_xxx")
+    .base_url("https://loom.example.com")
+    .crash_client(&crash)  // Optional: link errors to crashes
+    .build()?;
+
+// Manual check-in pattern
+let checkin_id = crons.checkin_start("daily-cleanup").await?;
+
+match run_daily_cleanup() {
+    Ok(result) => {
+        crons.checkin_ok(checkin_id, CheckInOk {
+            duration_ms: Some(elapsed.as_millis() as u64),
+            output: Some(format!("Processed {} records", result.count)),
+        }).await?;
+    }
+    Err(e) => {
+        let crash_id = crash.capture_error(&e).await?;
+        
+        crons.checkin_error(checkin_id, CheckInError {
+            duration_ms: Some(elapsed.as_millis() as u64),
+            exit_code: Some(1),
+            output: Some(e.to_string()),
+            crash_event_id: Some(crash_id),
+        }).await?;
+    }
+}
+
+// Convenience wrapper
+crons.with_monitor("daily-cleanup", || async {
+    run_daily_cleanup().await
+}).await?;
+```
+
+### TypeScript SDK
+
+```bash
+npm install @loom/crons
+```
+
+```typescript
+import { CronsClient } from '@loom/crons';
+import { CrashClient } from '@loom/crash';
+
+const crons = new CronsClient({
+  apiKey: 'loom_crons_xxx',
+  baseUrl: 'https://loom.example.com',
+  crashClient: crash,  // Optional
+});
+
+// Manual pattern
+const checkinId = await crons.checkinStart('email-digest');
+
+try {
+  await sendEmailDigest();
+  await crons.checkinOk(checkinId, {
+    durationMs: Date.now() - startTime,
+    output: 'Sent 150 emails',
+  });
+} catch (error) {
+  const crashId = await crash.captureException(error);
+  await crons.checkinError(checkinId, {
+    durationMs: Date.now() - startTime,
+    output: error.message,
+    crashEventId: crashId,
+  });
+}
+
+// Convenience wrapper
+await crons.withMonitor('email-digest', async () => {
+  await sendEmailDigest();
+});
+```
+
+## Creating Monitors
+
+Create via API:
+
+```bash
+curl -X POST https://loom.example.com/api/crons/monitors \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "slug": "daily-cleanup",
+    "name": "Daily Cleanup Job",
+    "schedule": {
+      "type": "cron",
+      "expression": "0 0 * * *"
+    },
+    "timezone": "America/New_York",
+    "checkin_margin_minutes": 5,
+    "max_runtime_minutes": 60,
+    "environments": ["production"]
+  }'
+```
+
+**Response:**
+```json
+{
+  "monitor": {
+    "id": "mon_xxx",
+    "slug": "daily-cleanup",
+    "ping_url": "https://loom.example.com/ping/abc123-def456",
+    "status": "active",
+    "health": "unknown"
+  }
+}
+```
+
+## Cron Expressions
+
+Standard 5-field format:
+
+```
+┌───────────── minute (0 - 59)
+│ ┌───────────── hour (0 - 23)
+│ │ ┌───────────── day of month (1 - 31)
+│ │ │ ┌───────────── month (1 - 12)
+│ │ │ │ ┌───────────── day of week (0 - 6) (Sunday = 0)
+│ │ │ │ │
+* * * * *
+```
+
+**Examples:**
+
+| Expression | Description |
+|------------|-------------|
+| `0 0 * * *` | Daily at midnight |
+| `*/15 * * * *` | Every 15 minutes |
+| `0 9 * * 1-5` | 9am on weekdays |
+| `0 0 1 * *` | First of every month |
+| `30 2 * * 0` | 2:30am on Sundays |
+
+## Grace Period & Timeouts
+
+### Grace Period
+
+The `checkin_margin_minutes` provides tolerance:
+
+```
+Expected at: 00:00:00
+Grace: 5 minutes
+
+├──────────────────────┬───────────────────────┤
+│    On-time window    │   Grace period        │
+│    00:00:00          │   00:00:00 - 00:05:00 │
+├──────────────────────┴───────────────────────┤
+│    After 00:05:00 = MISSED                   │
+└──────────────────────────────────────────────┘
+```
+
+### Timeout Detection
+
+If `max_runtime_minutes` is set, jobs exceeding this are marked as timeout:
+
+```rust
+// Monitor with 60-minute timeout
+Monitor {
+    max_runtime_minutes: Some(60),
+    ...
+}
+
+// Job running for 61 minutes → status: Timeout
+```
+
+## API Endpoints
+
+### Ping Endpoints (No Auth)
+
+<ParamField path="GET /ping/:key" type="endpoint">
+  Success ping
+</ParamField>
+
+<ParamField path="GET /ping/:key/start" type="endpoint">
+  Job starting
+  
+  **Response:**
+  ```json
+  {
+    "checkin_id": "chk_xxx"
+  }
+  ```
+</ParamField>
+
+<ParamField path="GET /ping/:key/fail" type="endpoint">
+  Job failed
+  
+  **Query Parameters:**
+  - `exit_code` - Exit code (optional)
+</ParamField>
+
+<ParamField path="POST /ping/:key" type="endpoint">
+  Ping with output body
+  
+  **Body:** Plain text output (max 10KB)
+</ParamField>
+
+### Monitor Management
+
+<ParamField path="GET /api/crons/monitors" type="endpoint">
+  List monitors
+  
+  **Query Parameters:**
+  - `status` - Filter by status (active, paused, disabled)
+  - `health` - Filter by health (healthy, failing, missed)
+</ParamField>
+
+<ParamField path="POST /api/crons/monitors" type="endpoint">
+  Create monitor
+  
+  **Request:**
+  ```json
+  {
+    "slug": "daily-backup",
+    "name": "Daily Database Backup",
+    "schedule": {
+      "type": "interval",
+      "minutes": 1440
+    },
+    "timezone": "UTC"
+  }
+  ```
+</ParamField>
+
+<ParamField path="PATCH /api/crons/monitors/:slug" type="endpoint">
+  Update monitor
+</ParamField>
+
+<ParamField path="POST /api/crons/monitors/:slug/pause" type="endpoint">
+  Pause monitoring (won't alert on missed runs)
+</ParamField>
+
+<ParamField path="POST /api/crons/monitors/:slug/resume" type="endpoint">
+  Resume monitoring
+</ParamField>
+
+### Check-in Management
+
+<ParamField path="POST /api/crons/monitors/:slug/checkins" type="endpoint">
+  Create check-in (SDK)
+  
+  **Request:**
+  ```json
+  {
+    "status": "in_progress",
+    "started_at": "2026-01-18T12:00:00Z"
+  }
+  ```
+</ParamField>
+
+<ParamField path="PATCH /api/crons/checkins/:id" type="endpoint">
+  Update check-in
+  
+  **Request:**
+  ```json
+  {
+    "status": "ok",
+    "finished_at": "2026-01-18T12:05:00Z",
+    "duration_ms": 300000,
+    "output": "Processed 1000 records"
+  }
+  ```
+</ParamField>
+
+<ParamField path="GET /api/crons/monitors/:slug/checkins" type="endpoint">
+  List check-ins for monitor
+  
+  **Query Parameters:**
+  - `limit` - Max results (default: 100)
+  - `status` - Filter by status
+</ParamField>
+
+## Real-time Updates (SSE)
+
+Subscribe to monitor events:
+
+```typescript
+const eventSource = new EventSource(
+  'https://loom.example.com/api/crons/stream',
+  { headers: { Authorization: 'Bearer <token>' } }
+);
+
+eventSource.addEventListener('monitor.missed', (event) => {
+  const data = JSON.parse(event.data);
+  console.log(`Monitor ${data.monitor_name} missed check-in!`);
+  sendAlert(data);
+});
+```
+
+**Events:**
+- `checkin.started` - Job started
+- `checkin.ok` - Job completed successfully
+- `checkin.error` - Job failed
+- `monitor.missed` - Expected check-in didn't arrive
+- `monitor.timeout` - Job exceeded max_runtime
+- `monitor.healthy` - Monitor recovered from failure
+
+## Statistics
+
+Get monitor stats:
+
+```bash
+curl https://loom.example.com/api/crons/monitors/daily-cleanup/stats?period=week
+```
+
+**Response:**
+```json
+{
+  "total_checkins": 168,
+  "successful_checkins": 165,
+  "failed_checkins": 2,
+  "missed_checkins": 1,
+  "timeout_checkins": 0,
+  "avg_duration_ms": 45000,
+  "p95_duration_ms": 120000,
+  "uptime_percentage": 98.2
+}
+```
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Set Grace Periods" icon="clock">
+    Use `checkin_margin_minutes` to avoid false alerts for jobs that vary slightly in timing
+  </Card>
+  
+  <Card title="Monitor Timeouts" icon="stopwatch">
+    Set `max_runtime_minutes` to detect hung jobs
+  </Card>
+  
+  <Card title="Environment Filters" icon="filter">
+    Use `environments` to only monitor production runs
+  </Card>
+  
+  <Card title="Capture Output" icon="terminal">
+    POST output to ping URLs for debugging failed runs
+  </Card>
+</CardGroup>
+
+## See Also
+
+<CardGroup cols={3}>
+  <Card title="Crash Tracking" icon="bug" href="/observability/crash-tracking">
+    Link failed jobs to crash events
+  </Card>
+  
+  <Card title="Analytics" icon="chart-line" href="/observability/analytics">
+    Track job execution patterns
+  </Card>
+  
+  <Card title="Sessions" icon="clock" href="/observability/sessions">
+    Monitor job session health
+  </Card>
+</CardGroup>

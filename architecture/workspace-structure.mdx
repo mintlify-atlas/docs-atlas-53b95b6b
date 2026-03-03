@@ -1,0 +1,742 @@
+---
+title: Cargo Workspace Structure
+description: Complete guide to Loom's 80+ crate organization and dependency management
+---
+
+Loom is organized as a Cargo workspace with 80+ specialized crates. This modular architecture enables parallel compilation, clean dependency boundaries, and reusable components across CLI, server, and TUI applications.
+
+## Workspace Configuration
+
+The root `Cargo.toml` defines workspace members and shared dependencies:
+
+```toml
+[workspace]
+resolver = "2"
+members = [
+    "crates/loom-cli-acp",
+    "crates/loom-server-auth",
+    "crates/loom-server-auth-devicecode",
+    "crates/loom-server-auth-github",
+    # ... 80+ total crates
+]
+
+[workspace.package]
+version = "0.1.0"
+authors = ["Geoffrey Huntley"]
+edition = "2021"
+license = "LicenseRef-Proprietary"
+repository = "https://github.com/ghuntley/loom"
+```
+
+## Crate Categories
+
+### Common Layer (`loom-common-*`)
+
+Foundation crates providing shared functionality across all applications.
+
+<AccordionGroup>
+  <Accordion title="loom-common-core">
+    **Core abstractions and types**
+    
+    - `LlmClient` trait for LLM provider abstraction
+    - `Agent` state machine for conversation flow
+    - `LlmRequest`, `LlmResponse`, `LlmStream` types
+    - `Message`, `Role`, `ToolCall` message types
+    - `AgentState`, `AgentEvent`, `AgentAction` enums
+    - `ToolDefinition`, `ToolContext` for tool system
+    
+    **Key Files:**
+    - `agent.rs` - Agent state machine implementation
+    - `llm.rs` - LLM client trait and types
+    - `state.rs` - State machine types
+    - `message.rs` - Message types
+    - `tool.rs` - Tool abstractions
+    - `error.rs` - Error types
+  </Accordion>
+
+  <Accordion title="loom-common-http">
+    **Shared HTTP utilities**
+    
+    - `new_client()` - Creates HTTP client with standard User-Agent
+    - `builder()` - Returns ClientBuilder with User-Agent
+    - `RetryConfig` - Configurable retry parameters
+    - `RetryableError` trait - Determines retry eligibility
+    - `retry()` function - Exponential backoff wrapper
+    
+    User-Agent format: `loom/{platform}/{git_sha}`
+  </Accordion>
+
+  <Accordion title="loom-common-config">
+    **Configuration management**
+    
+    - Layered config: CLI args → env vars → config file → defaults
+    - XDG Base Directory compliance
+    - TOML configuration format
+    - Environment variable overrides
+  </Accordion>
+
+  <Accordion title="loom-common-secret">
+    **Secret handling**
+    
+    - `Secret<T>` wrapper for sensitive values
+    - `SecretString` type alias
+    - Auto-redaction in Debug/Display/Serialize
+    - `expose()` method for controlled access
+    - Integration with tracing (auto-skip in logs)
+  </Accordion>
+
+  <Accordion title="loom-common-thread">
+    **Conversation persistence**
+    
+    - SQLite-based thread storage
+    - FTS5 full-text search
+    - Git metadata tracking
+    - Cross-device sync
+    - Message history management
+  </Accordion>
+
+  <Accordion title="loom-common-webhook">
+    **Webhook handling**
+    
+    - Webhook signature verification
+    - Event payload parsing
+    - Retry logic for failed webhooks
+  </Accordion>
+
+  <Accordion title="loom-common-i18n">
+    **Internationalization**
+    
+    - GNU gettext-based translation
+    - 17 supported locales
+    - `.po` files compiled to `.mo` at build time
+    - `t()` and `t_fmt()` translation functions
+    - RTL language support
+    
+    **Locales:** `en`, `es`, `ar`, `fr`, `de`, `ja`, `zh`, `ko`, `pt`, `ru`, `hi`, `it`, `nl`, `pl`, `tr`, `vi`, `th`
+  </Accordion>
+
+  <Accordion title="loom-common-spool">
+    **Version control integration**
+    
+    - jj (Jujutsu) VCS integration
+    - Tapestry naming (stitch, pin, tangle)
+    - Conflict-free replicated data types
+  </Accordion>
+
+  <Accordion title="loom-common-version">
+    **Version management**
+    
+    - Semantic versioning
+    - Git commit tracking
+    - Build metadata
+  </Accordion>
+</AccordionGroup>
+
+### Server Layer (`loom-server-*`)
+
+Server-side components for HTTP API, authentication, and LLM integration.
+
+<AccordionGroup>
+  <Accordion title="loom-server">
+    **Main HTTP API server**
+    
+    - Axum-based HTTP server
+    - OpenAPI documentation with Swagger UI
+    - Health check endpoint (`/health`)
+    - WebSocket support for real-time updates
+    - Graceful shutdown
+    - Database migrations
+    
+    **Migrations:** `crates/loom-server/migrations/NNN_description.sql`
+  </Accordion>
+
+  <Accordion title="loom-server-api">
+    **API route handlers**
+    
+    - Thread management routes
+    - Weaver provisioning routes
+    - Analytics routes
+    - Feature flag routes
+    - SCIM routes
+    - SCM routes
+  </Accordion>
+
+  <Accordion title="loom-server-db">
+    **Database access layer**
+    
+    - SQLite with sqlx
+    - Connection pooling
+    - Migration management
+    - Query builders
+  </Accordion>
+
+  <Accordion title="loom-server-llm-service">
+    **LLM provider abstraction**
+    
+    - `LlmService` - Multi-provider support
+    - Provider availability checks: `has_anthropic()`, `has_openai()`, etc.
+    - Provider-specific methods: `complete_anthropic()`, `complete_openai()`, etc.
+    - Owns all API keys server-side
+    
+    **Dependencies:**
+    - `loom-server-llm-anthropic`
+    - `loom-server-llm-openai`
+    - `loom-server-llm-vertex`
+    - `loom-server-llm-zai`
+  </Accordion>
+
+  <Accordion title="loom-server-llm-proxy">
+    **Client-side LLM proxy**
+    
+    - `ProxyLlmClient` - Implements `LlmClient` via HTTP
+    - Provider-specific constructors: `anthropic()`, `openai()`, `vertex()`, `zai()`
+    - SSE stream parsing
+    - Bearer token authentication
+  </Accordion>
+
+  <Accordion title="loom-server-llm-anthropic">
+    **Anthropic Claude client**
+    
+    - Claude API integration
+    - SSE streaming support
+    - Tool calling
+    - System message handling
+    - OAuth 2.0 PKCE for Claude Pro/Max subscriptions
+  </Accordion>
+
+  <Accordion title="loom-server-llm-openai">
+    **OpenAI GPT client**
+    
+    - OpenAI API integration
+    - Streaming completions
+    - Function calling
+    - Organization support
+  </Accordion>
+
+  <Accordion title="loom-server-llm-vertex">
+    **Google Vertex AI client**
+    
+    - Vertex AI API integration
+    - Gemini Pro, Gemini Flash models
+    - Service account authentication
+  </Accordion>
+
+  <Accordion title="loom-server-llm-zai">
+    **Z.ai client (智谱AI)**
+    
+    - Z.ai API integration (OpenAI-compatible)
+    - GLM-4 models: `glm-4.7`, `glm-4.6`, `glm-4.5`, etc.
+    - Streaming support
+  </Accordion>
+
+  <Accordion title="loom-server-auth*">
+    **Authentication providers**
+    
+    - `loom-server-auth` - Auth abstraction layer
+    - `loom-server-auth-devicecode` - Device code flow (OAuth 2.0)
+    - `loom-server-auth-github` - GitHub OAuth
+    - `loom-server-auth-google` - Google OAuth
+    - `loom-server-auth-magiclink` - Email magic links
+    - `loom-server-auth-okta` - Okta OIDC
+    
+    **ABAC:** Attribute-based access control
+  </Accordion>
+
+  <Accordion title="loom-server-k8s">
+    **Kubernetes integration**
+    
+    - Pod provisioning
+    - Service discovery
+    - Resource management
+    - Health checks
+  </Accordion>
+
+  <Accordion title="loom-server-weaver">
+    **Remote execution pods**
+    
+    - Weaver provisioning
+    - Lifecycle management
+    - Resource limits
+    - Audit logging
+  </Accordion>
+
+  <Accordion title="loom-server-scm">
+    **Git hosting**
+    
+    - Repository management
+    - Branch protection
+    - Webhooks
+    - Mirroring
+    - Access control
+  </Accordion>
+
+  <Accordion title="Other Server Crates">
+    - `loom-server-session` - Session management
+    - `loom-server-geoip` - IP geolocation
+    - `loom-server-jobs` - Background job scheduler
+    - `loom-server-smtp` - Email sending
+    - `loom-server-email` - Email templates and i18n
+    - `loom-server-github-app` - GitHub App integration
+    - `loom-server-search-serper` - Serper API search
+    - `loom-server-search-google-cse` - Google Custom Search
+    - `loom-server-provisioning` - User/org provisioning
+    - `loom-server-scim` - SCIM 2.0 for IdP integration
+    - `loom-server-audit` - Audit logging with SIEM
+    - `loom-server-config` - Server configuration
+    - `loom-server-logs` - Log aggregation
+    - `loom-server-clips` - Code snippet sharing (gists)
+    - `loom-server-secrets` - Secret management for weavers
+    - `loom-server-wgtunnel` - WireGuard tunnel server
+    - `loom-server-docs` - Documentation API
+  </Accordion>
+</AccordionGroup>
+
+### CLI Layer (`loom-cli-*`)
+
+Command-line interface and related utilities.
+
+<AccordionGroup>
+  <Accordion title="loom-cli">
+    **Main CLI binary**
+    
+    - Command-line argument parsing (clap)
+    - REPL loop
+    - Tool execution orchestration
+    - ProxyLlmClient integration
+    - Thread management
+    - Weaver management
+  </Accordion>
+
+  <Accordion title="loom-cli-config">
+    **CLI configuration**
+    
+    - CLI-specific settings
+    - Server URL configuration
+    - Default model selection
+  </Accordion>
+
+  <Accordion title="loom-cli-credentials">
+    **Credential management**
+    
+    - OAuth token storage
+    - Keychain integration
+    - Token refresh
+  </Accordion>
+
+  <Accordion title="loom-cli-tools">
+    **Agent tool implementations**
+    
+    - `ReadFileTool` - Read file contents
+    - `ListFilesTool` - List directory contents
+    - `EditFileTool` - Edit file with search/replace
+    - `BashTool` - Execute bash commands
+    - `GrepTool` - Search file contents
+    - `GlobTool` - Find files by pattern
+    - Tool registry
+  </Accordion>
+
+  <Accordion title="loom-cli-git">
+    **Git operations**
+    
+    - Repository detection
+    - File staging
+    - Commit creation
+    - Git metadata tracking
+  </Accordion>
+
+  <Accordion title="loom-cli-auto-commit">
+    **Auto-commit orchestration**
+    
+    - Post-tool hook integration
+    - LLM-powered commit message generation
+    - Automatic staging and committing
+  </Accordion>
+
+  <Accordion title="loom-cli-acp">
+    **Agent Client Protocol**
+    
+    - Editor integration protocol
+    - JSON-RPC communication
+    - Event streaming
+  </Accordion>
+
+  <Accordion title="loom-cli-spool">
+    **Spool (jj) integration**
+    
+    - Jujutsu VCS operations
+    - Tapestry workflow support
+  </Accordion>
+
+  <Accordion title="loom-cli-wgtunnel">
+    **WireGuard tunnel client**
+    
+    - WireGuard tunnel management for weaver access
+    - DERP relay support
+  </Accordion>
+</AccordionGroup>
+
+### Observability Suite
+
+Integrated observability platform inspired by Sentry/PostHog.
+
+<AccordionGroup>
+  <Accordion title="Analytics">
+    **PostHog-style product analytics**
+    
+    - `loom-analytics-core` - Core types and traits
+    - `loom-analytics` - Client library
+    - `loom-server-analytics` - Server ingestion and storage
+    
+    **Features:**
+    - Event tracking
+    - User identification
+    - Identity resolution (merge users across devices)
+    - Funnel analysis
+    - Cohort analysis
+  </Accordion>
+
+  <Accordion title="Crash Reporting">
+    **Crash analytics with symbolication**
+    
+    - `loom-crash-core` - Core crash types
+    - `loom-crash` - Client crash reporter
+    - `loom-crash-symbolicate` - Source map symbolication
+    - `loom-server-crash` - Crash ingestion and deduplication
+    
+    **Features:**
+    - Stack trace capture
+    - Regression detection
+    - Crash grouping
+    - Source map upload and symbolication
+  </Accordion>
+
+  <Accordion title="Cron Monitoring">
+    **Scheduled job monitoring**
+    
+    - `loom-crons-core` - Cron core types
+    - `loom-crons` - Client check-in library
+    - `loom-server-crons` - Cron monitoring server
+    
+    **Features:**
+    - Ping URL check-ins
+    - SDK check-ins with duration tracking
+    - Miss detection
+    - Alert integration
+  </Accordion>
+
+  <Accordion title="Session Analytics">
+    **Session health tracking**
+    
+    - `loom-sessions-core` - Session core types
+    - `loom-server-sessions` - Session analytics server
+    
+    **Features:**
+    - Release health tracking
+    - Crash-free session rate
+    - Session replay
+    - Adoption tracking
+  </Accordion>
+
+  <Accordion title="Feature Flags">
+    **Runtime feature toggles**
+    
+    - `loom-flags-core` - Flag core types
+    - `loom-flags` - Client flag evaluation
+    - `loom-server-flags` - Flag management server
+    
+    **Features:**
+    - Boolean flags
+    - Multivariate flags
+    - Percentage rollouts
+    - User/org targeting
+    - Kill switches
+    - SSE updates for real-time changes
+  </Accordion>
+</AccordionGroup>
+
+### TUI Layer (`loom-tui-*`)
+
+Terminal user interface components based on Ratatui 0.30.
+
+<AccordionGroup>
+  <Accordion title="loom-tui-app">
+    **Main TUI application**
+    
+    - Event loop
+    - Screen management
+    - Keyboard handling
+    - Component composition
+  </Accordion>
+
+  <Accordion title="loom-tui-core">
+    **Core TUI abstractions**
+    
+    - Component trait
+    - Event system
+    - State management
+  </Accordion>
+
+  <Accordion title="loom-tui-component">
+    **Component system**
+    
+    - Composable components
+    - Props pattern
+    - Event propagation
+  </Accordion>
+
+  <Accordion title="loom-tui-theme">
+    **Theming support**
+    
+    - Color schemes
+    - Style definitions
+    - Theme switching
+  </Accordion>
+
+  <Accordion title="loom-tui-widget-*">
+    **Reusable widgets**
+    
+    - `loom-tui-widget-message-list` - Chat message display
+    - `loom-tui-widget-input-box` - Text input
+    - `loom-tui-widget-markdown` - Markdown rendering
+    - `loom-tui-widget-thread-list` - Thread/conversation list
+    - `loom-tui-widget-tool-panel` - Tool execution status
+    - `loom-tui-widget-status-bar` - Status information
+    - `loom-tui-widget-header` - Application header
+    - `loom-tui-widget-modal` - Modal dialogs
+    - `loom-tui-widget-spinner` - Loading spinner
+    - `loom-tui-widget-scrollable` - Scrollable containers
+  </Accordion>
+
+  <Accordion title="loom-tui-storybook">
+    **Visual snapshot testing**
+    
+    - Component storybook
+    - Visual regression tests
+    - Screenshot comparison
+  </Accordion>
+
+  <Accordion title="loom-tui-testing">
+    **TUI testing utilities**
+    
+    - Mock terminal
+    - Event simulation
+    - Snapshot assertions
+  </Accordion>
+</AccordionGroup>
+
+### Weaver (Remote Execution)
+
+Kubernetes-based remote execution environment.
+
+<AccordionGroup>
+  <Accordion title="loom-weaver-secrets">
+    **SPIFFE-style identity and secrets**
+    
+    - SPIFFE Verifiable Identity Document (SVID)
+    - Secret injection into pods
+    - Rotation support
+  </Accordion>
+
+  <Accordion title="loom-weaver-audit-sidecar">
+    **eBPF syscall auditing**
+    
+    - eBPF program loader
+    - Syscall event capture
+    - Audit log streaming
+  </Accordion>
+
+  <Accordion title="loom-weaver-wgtunnel">
+    **WireGuard tunnel for weaver access**
+    
+    - WireGuard client for weaver pods
+    - Tunnel setup and teardown
+  </Accordion>
+
+  <Accordion title="loom-weaver-ebpf">
+    **eBPF programs**
+    
+    - Syscall tracing programs
+    - Network monitoring
+    - File access tracking
+  </Accordion>
+
+  <Accordion title="loom-wgtunnel-*">
+    **WireGuard tunnel with DERP relay**
+    
+    - `loom-wgtunnel-common` - Shared types
+    - `loom-wgtunnel-conn` - Connection management
+    - `loom-wgtunnel-derp` - DERP relay protocol
+    - `loom-wgtunnel-engine` - Tunnel engine
+    
+    Enables SSH and TCP access to weavers behind NAT.
+  </Accordion>
+</AccordionGroup>
+
+### Utility Crates
+
+<AccordionGroup>
+  <Accordion title="loom-redact">
+    **Secret detection**
+    
+    - Gitleaks pattern-based detection
+    - Automatic redaction
+    - Secret scanning
+  </Accordion>
+
+  <Accordion title="loom-scim">
+    **SCIM 2.0 types**
+    
+    - RFC 7643/7644 compliance
+    - User/Group resources
+    - Patch operations
+  </Accordion>
+
+  <Accordion title="loom-jobs">
+    **Background job system**
+    
+    - Job queue
+    - Worker pool
+    - Retry logic
+  </Accordion>
+
+  <Accordion title="loom-whatsapp">
+    **WhatsApp Business API**
+    
+    - Message sending
+    - Webhook handling
+    - Media support
+  </Accordion>
+</AccordionGroup>
+
+## Dependency Graph
+
+The workspace follows strict layering:
+
+```
+loom-common-core (bottom layer)
+    ↑
+loom-common-http
+    ↑
+loom-server-llm-* (provider implementations, server-only)
+    ↑
+loom-server-llm-service (provider abstraction)
+    ↑
+loom-server (HTTP server)
+    ↑
+loom-server-llm-proxy (client-side proxy client)
+    ↑
+loom-cli-tools (depends only on loom-common-core)
+    ↑
+loom-cli (top layer)
+```
+
+<Warning>
+  **Key constraint:** Lower-layer crates never depend on higher-layer crates. This ensures:
+  - Core types are reusable
+  - Provider implementations are isolated to server-side
+  - Clear compilation order
+</Warning>
+
+## Build Optimization
+
+### Profile Settings
+
+The workspace uses custom build profiles for faster development:
+
+```toml
+[profile.dev]
+debug = 1                    # Reduced debug info
+split-debuginfo = "unpacked" # Faster linking
+incremental = true
+
+[profile.dev.package.loom-server]
+codegen-units = 256          # More parallelism for large crates
+
+[profile.dev-fast]
+inherits = "dev"
+debug = 0                    # No debug info for fastest builds
+codegen-units = 512
+
+[profile.release]
+lto = false
+opt-level = 0                # Zero optimization for fast compile
+codegen-units = 256
+strip = "debuginfo"
+```
+
+### cargo2nix Integration
+
+The workspace uses cargo2nix for reproducible builds:
+
+```bash
+# Update Cargo.nix after modifying Cargo.lock
+cargo2nix-update
+
+# Build any crate
+nix build .#loom-common-core-c2n
+```
+
+<Info>
+  cargo2nix provides **per-crate caching**, making incremental builds much faster than cargo alone.
+</Info>
+
+## Database Migrations
+
+<Warning>
+  **All database migrations** must go in `crates/loom-server/migrations/` as numbered SQL files.
+  
+  **Convention:** `NNN_description.sql` (e.g., `020_scm_repos.sql`)
+  
+  **DO NOT** put inline SQL migrations in other crates.
+</Warning>
+
+Migrations run automatically on server startup. After adding/modifying migrations:
+
+1. Run `cargo2nix-update` (cargo2nix doesn't track `include_str!` file changes)
+2. Commit `Cargo.nix` along with migration changes
+3. Without this step, deployed binary won't include the new migration!
+
+## Testing Strategy
+
+### Unit Tests
+
+Most crates include unit tests in `src/` files or `tests/` directory.
+
+### Integration Tests
+
+Integration tests live in crate-specific `tests/` directories.
+
+### Property-Based Tests
+
+Critical crates use `proptest` for property-based testing:
+
+```rust
+use proptest::prelude::*;
+
+proptest! {
+    #[test]
+    fn agent_always_starts_in_waiting(
+        config in any::<AgentConfig>()
+    ) {
+        let agent = Agent::new(config);
+        assert!(matches!(agent.state(), AgentState::WaitingForUserInput { .. }));
+    }
+}
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Architecture Overview" icon="sitemap" href="/architecture/overview">
+    High-level system design
+  </Card>
+  <Card title="LLM Proxy" icon="server" href="/architecture/llm-proxy">
+    Server-side LLM proxy details
+  </Card>
+  <Card title="State Machine" icon="diagram-project" href="/architecture/state-machine">
+    Agent state machine design
+  </Card>
+  <Card title="Specifications" icon="folder-open" href="https://github.com/ghuntley/loom/tree/trunk/specs">
+    Browse all technical specs
+  </Card>
+</CardGroup>

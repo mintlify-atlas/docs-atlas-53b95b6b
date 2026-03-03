@@ -1,0 +1,537 @@
+---
+title: "Crash Tracking"
+description: "Capture errors and crashes with source map symbolication and issue grouping"
+---
+
+## Overview
+
+Loom's crash tracking system captures errors and crashes from TypeScript (browser + Node.js) and Rust applications, groups them into issues via fingerprinting, tracks regressions across releases, and provides source context through uploaded source maps.
+
+<Note>
+Crash tracking integrates with [analytics](/observability/analytics) for person identity and feature flags to capture active flags at crash time.
+</Note>
+
+## Key Features
+
+- **Multi-platform** crash capture: JavaScript, Node.js, Rust
+- **Issue grouping** via fingerprinting to deduplicate similar crashes
+- **Issue lifecycle** with unresolved/resolved/ignored/regressed states
+- **Regression detection** when resolved issues reappear
+- **Source map uploads** for TypeScript with source context
+- **Rust backtrace** symbolication with demangling
+
+## Core Concepts
+
+### Crash Event
+
+A single crash occurrence:
+
+```rust
+pub struct CrashEvent {
+    pub id: CrashEventId,
+    pub org_id: OrgId,
+    pub project_id: ProjectId,
+    pub issue_id: Option<IssueId>,
+    
+    // Identity
+    pub person_id: Option<PersonId>,
+    pub distinct_id: String,
+    
+    // Error
+    pub exception_type: String,
+    pub exception_value: String,
+    pub stacktrace: Stacktrace,
+    
+    // Context
+    pub release: Option<String>,
+    pub environment: String,
+    pub platform: Platform,
+    pub tags: HashMap<String, String>,
+    pub active_flags: HashMap<String, String>,
+    pub breadcrumbs: Vec<Breadcrumb>,
+}
+```
+
+### Issue
+
+An aggregated group of similar crashes:
+
+```rust
+pub struct Issue {
+    pub id: IssueId,
+    pub short_id: String,           // "PROJ-123"
+    pub fingerprint: String,        // SHA256 hash
+    pub title: String,
+    pub status: IssueStatus,
+    pub level: IssueLevel,
+    pub event_count: u64,
+    pub user_count: u64,
+    pub first_seen: DateTime<Utc>,
+    pub last_seen: DateTime<Utc>,
+}
+```
+
+**Issue statuses:**
+
+| Status | Description |
+|--------|-------------|
+| `Unresolved` | New or ongoing issue |
+| `Resolved` | Fixed by developer |
+| `Ignored` | Intentionally ignored |
+| `Regressed` | Resolved issue reappeared |
+
+### Platform Types
+
+```rust
+pub enum Platform {
+    JavaScript,  // Browser
+    Node,        // Node.js
+    Rust,
+}
+```
+
+## Rust SDK
+
+Install the SDK:
+
+```toml
+[dependencies]
+loom-crash = { version = "0.1" }
+loom-analytics = { version = "0.1" }  # Optional: for identity
+loom-flags = { version = "0.1" }      # Optional: for flag capture
+```
+
+### Setup with Integrations
+
+```rust
+use loom_crash::CrashClient;
+use loom_analytics::AnalyticsClient;
+use loom_flags::FlagsClient;
+
+// Initialize crash client with integrations
+let crash = CrashClient::builder()
+    .api_key("loom_crash_xxx")
+    .base_url("https://loom.example.com")
+    .project("my-rust-app")
+    .release(env!("CARGO_PKG_VERSION"))
+    // Integrate with analytics for person identity
+    .analytics(&analytics_client)
+    // Integrate with flags to capture active flags
+    .flags(&flags_client)
+    .build()?;
+
+// Install panic hook (captures all panics)
+crash.install_panic_hook();
+
+// Set user context
+crash.set_user(UserContext {
+    id: Some(user.id.to_string()),
+    email: Some(user.email.clone()),
+    ..Default::default()
+});
+
+// Add global tags
+crash.set_tag("environment", "production");
+crash.set_tag("server", hostname);
+```
+
+### Capturing Errors
+
+```rust
+// Manual capture
+if let Err(e) = do_something() {
+    crash.capture_error(&e);
+}
+
+// Capture breadcrumb
+crash.add_breadcrumb(Breadcrumb {
+    category: "http".into(),
+    message: Some("GET /api/users".into()),
+    level: BreadcrumbLevel::Info,
+    ..Default::default()
+});
+
+// Scoped context
+crash.with_scope(|scope| {
+    scope.set_tag("handler", "create_user");
+    scope.set_extra("request_id", json!(request_id));
+    process_request()?;
+    Ok(())
+})?;
+
+// Shutdown (flushes pending events)
+crash.shutdown().await?;
+```
+
+## TypeScript SDK
+
+Install the SDK:
+
+```bash
+npm install @loom/crash
+```
+
+### Browser Setup
+
+```typescript
+import { CrashClient } from '@loom/crash';
+import { AnalyticsClient } from '@loom/analytics';
+import { FlagsClient } from '@loom/flags';
+
+const crash = new CrashClient({
+  apiKey: 'loom_crash_xxx',
+  baseUrl: 'https://loom.example.com',
+  project: 'my-web-app',
+  release: '1.2.3',
+  environment: 'production',
+  
+  // Integrate with other SDKs
+  analytics,
+  flags,
+  
+  // Options
+  maxBreadcrumbs: 100,
+  beforeSend: (event) => {
+    // Filter or modify events before sending
+    if (event.exception_value.includes('ResizeObserver')) {
+      return null; // Drop this event
+    }
+    return event;
+  },
+});
+
+// Install global handlers
+crash.installGlobalHandler();
+
+// Set user context
+crash.setUser({
+  id: user.id,
+  email: user.email,
+});
+```
+
+### Capturing Exceptions
+
+```typescript
+// Manual capture
+try {
+  await riskyOperation();
+} catch (error) {
+  crash.captureException(error, {
+    tags: { operation: 'risky' },
+    extra: { attemptNumber: 3 },
+  });
+}
+
+// Add breadcrumb
+crash.addBreadcrumb({
+  category: 'navigation',
+  message: 'User navigated to /dashboard',
+  level: 'info',
+});
+```
+
+### React Error Boundary
+
+```typescript
+import { CrashBoundary } from '@loom/crash/react';
+
+function App() {
+  return (
+    <CrashBoundary
+      client={crash}
+      fallback={<ErrorPage />}
+      onError={(error, errorInfo) => {
+        console.log('Crash captured:', error);
+      }}
+    >
+      <MyApp />
+    </CrashBoundary>
+  );
+}
+```
+
+## Source Maps
+
+Upload source maps to get readable stack traces for minified JavaScript:
+
+<Steps>
+  <Step title="Build your app with source maps">
+    ```javascript
+    // vite.config.ts
+    export default {
+      build: {
+        sourcemap: true
+      }
+    }
+    ```
+  </Step>
+  
+  <Step title="Upload source maps to Loom">
+    ```bash
+    loom crash upload-sourcemaps \
+      --project my-app \
+      --release 1.2.3 \
+      --include ./dist/**/*.map \
+      --include ./dist/**/*.js
+    ```
+  </Step>
+  
+  <Step title="Deploy your app">
+    Source maps are matched by release version and file paths
+  </Step>
+</Steps>
+
+### Build Tool Integration
+
+Vite plugin example:
+
+```typescript
+// vite.config.ts
+import { loomSourceMaps } from '@loom/crash-vite';
+
+export default {
+  plugins: [
+    loomSourceMaps({
+      project: 'my-app',
+      release: process.env.GIT_SHA,
+      apiKey: process.env.LOOM_CRASH_API_KEY,
+    }),
+  ],
+};
+```
+
+## Issue Fingerprinting
+
+Crashes are grouped by fingerprint (SHA256 hash):
+
+**Default algorithm:**
+1. Exception type (most significant)
+2. Top 5 in-app stack frames (function + module)
+3. If no in-app frames, use all frames
+
+**Example:**
+```
+TypeError | handleClick@App.tsx | onClick@Button.tsx
+```
+
+### Custom Fingerprinting
+
+Override fingerprinting rules via API:
+
+```json
+{
+  "fingerprint_rules": [
+    {
+      "match_type": "exception_message",
+      "pattern": "rate limit exceeded.*",
+      "fingerprint": ["rate-limit-error"]
+    },
+    {
+      "match_type": "module",
+      "pattern": "third_party::*",
+      "fingerprint": ["third-party-error", "{{ module }}"]
+    }
+  ]
+}
+```
+
+## Issue Lifecycle
+
+<Steps>
+  <Step title="Unresolved">
+    New crash creates issue in Unresolved state
+  </Step>
+  
+  <Step title="Resolve">
+    Mark issue as Resolved when fixed:
+    
+    ```bash
+    curl -X POST https://loom.example.com/api/crash/projects/proj-123/issues/iss-456/resolve \
+      -H "Authorization: Bearer <token>" \
+      -d '{"resolved_in_release": "1.2.4"}'
+    ```
+  </Step>
+  
+  <Step title="Regression Detection">
+    If new crash arrives for resolved issue:
+    - Status changes to **Regressed**
+    - `times_regressed` increments
+    - Real-time alert sent via SSE
+  </Step>
+  
+  <Step title="Ignore">
+    Permanently ignore an issue:
+    
+    ```bash
+    curl -X POST https://loom.example.com/api/crash/projects/proj-123/issues/iss-456/ignore
+    ```
+  </Step>
+</Steps>
+
+## API Endpoints
+
+### Capture Crashes
+
+<ParamField path="POST /api/crash/capture" type="endpoint">
+  Ingest single crash event (requires Capture API key)
+  
+  **Request:**
+  ```json
+  {
+    "distinct_id": "user_123",
+    "exception_type": "TypeError",
+    "exception_value": "Cannot read property 'x' of undefined",
+    "stacktrace": {
+      "frames": [
+        {
+          "function": "handleClick",
+          "filename": "App.tsx",
+          "lineno": 42,
+          "colno": 15,
+          "in_app": true
+        }
+      ]
+    },
+    "release": "1.2.3",
+    "environment": "production",
+    "platform": "javascript"
+  }
+  ```
+</ParamField>
+
+### Manage Issues
+
+<ParamField path="GET /api/crash/projects/:id/issues" type="endpoint">
+  List issues with filters
+  
+  **Query Parameters:**
+  - `status` - Filter by status (unresolved, resolved, etc.)
+  - `sort` - Sort by (last_seen, first_seen, event_count)
+  - `query` - Search in title/message
+</ParamField>
+
+<ParamField path="GET /api/crash/projects/:id/issues/:issueId" type="endpoint">
+  Get issue detail with recent events
+  
+  **Response:**
+  ```json
+  {
+    "issue": {
+      "id": "iss_xxx",
+      "short_id": "PROJ-123",
+      "title": "TypeError: Cannot read property 'x' of undefined",
+      "status": "unresolved",
+      "event_count": 42,
+      "user_count": 15,
+      "first_seen": "2026-01-01T00:00:00Z",
+      "last_seen": "2026-01-18T12:00:00Z"
+    },
+    "events": []
+  }
+  ```
+</ParamField>
+
+<ParamField path="POST /api/crash/projects/:id/issues/:issueId/resolve" type="endpoint">
+  Mark issue as resolved
+  
+  **Request:**
+  ```json
+  {
+    "resolved_in_release": "1.2.4"
+  }
+  ```
+</ParamField>
+
+### Upload Source Maps
+
+<ParamField path="POST /api/crash/projects/:id/artifacts" type="endpoint">
+  Upload source maps (multipart/form-data)
+  
+  **Form fields:**
+  - `release` - Release version
+  - `dist` - Distribution variant (optional)
+  - Files: `.map` and `.js` files
+</ParamField>
+
+## Real-time Updates (SSE)
+
+Subscribe to crash events:
+
+```typescript
+const eventSource = new EventSource(
+  'https://loom.example.com/api/crash/projects/proj-123/stream',
+  { headers: { Authorization: 'Bearer <token>' } }
+);
+
+eventSource.addEventListener('issue.regressed', (event) => {
+  const data = JSON.parse(event.data);
+  console.log(`Issue ${data.short_id} regressed!`);
+  showNotification(`Issue regressed: ${data.title}`);
+});
+```
+
+**Events:**
+- `crash.new` - New crash event
+- `issue.new` - New issue created
+- `issue.regressed` - Resolved issue regressed
+- `issue.resolved` - Issue resolved
+- `issue.assigned` - Issue assigned to user
+
+## Stack Frames
+
+Stack frames include source context after symbolication:
+
+```json
+{
+  "function": "handleSubmit",
+  "module": "components/Form",
+  "filename": "Form.tsx",
+  "lineno": 42,
+  "colno": 15,
+  "context_line": "    const result = await api.submit(data);",
+  "pre_context": [
+    "  async handleSubmit(data) {",
+    "    try {",
+    "      setLoading(true);"
+  ],
+  "post_context": [
+    "      setSuccess(true);",
+    "    } catch (error) {",
+    "      setError(error);"
+  ],
+  "in_app": true
+}
+```
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Upload Source Maps" icon="file-code">
+    Always upload source maps for production builds to get readable stack traces
+  </Card>
+  
+  <Card title="Set Release Version" icon="tag">
+    Use semantic versioning or commit SHA for release tracking
+  </Card>
+  
+  <Card title="Add Breadcrumbs" icon="shoe-prints">
+    Log user actions before crashes to aid debugging
+  </Card>
+  
+  <Card title="Filter Noise" icon="filter">
+    Use `beforeSend` hook to filter known browser quirks (ResizeObserver, etc.)
+  </Card>
+</CardGroup>
+
+## See Also
+
+<CardGroup cols={3}>
+  <Card title="Analytics" icon="chart-line" href="/observability/analytics">
+    Link crashes to person profiles
+  </Card>
+  
+  <Card title="Sessions" icon="clock" href="/observability/sessions">
+    Track crash-free session rates
+  </Card>
+</CardGroup>

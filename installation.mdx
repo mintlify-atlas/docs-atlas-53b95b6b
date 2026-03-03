@@ -1,0 +1,456 @@
+---
+title: "Installation"
+description: "Build and install Loom using Nix or Cargo with detailed setup instructions"
+---
+
+## Build Methods
+
+Loom supports two build methods:
+
+1. **Nix with cargo2nix** (Preferred) - Reproducible builds with per-crate caching
+2. **Cargo** (Development) - Standard Rust toolchain builds
+
+<Note>
+  Nix builds are significantly faster on incremental changes due to per-crate caching. Use Cargo for quick iteration during development.
+</Note>
+
+## Nix Build (Preferred)
+
+### Prerequisites
+
+<Steps>
+  <Step title="Install Nix">
+    Install Nix with flakes enabled:
+
+    ```bash
+    curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | sh -s -- install
+    ```
+  </Step>
+
+  <Step title="Enable Flakes">
+    Flakes should be enabled by default with the Determinate Systems installer. Verify:
+
+    ```bash
+    nix --version
+    ```
+  </Step>
+</Steps>
+
+### Building Loom
+
+Loom uses **cargo2nix** for reproducible builds with per-crate caching:
+
+<CodeGroup>
+```bash CLI
+# Build the CLI
+nix build .#loom-cli-c2n
+
+# Binary available at:
+./result/bin/loom --version
+```
+
+```bash Server
+# Build the server
+nix build .#loom-server-c2n
+
+# Binary available at:
+./result/bin/loom-server
+```
+
+```bash Any Crate
+# Build any crate in the workspace
+nix build .#loom-common-core-c2n
+nix build .#loom-common-thread-c2n
+nix build .#loom-server-auth-c2n
+```
+
+```bash Container Images
+# Build container images
+nix build .#loom-server-image
+nix build .#weaver-image
+```
+</CodeGroup>
+
+### cargo2nix Workflow
+
+When you modify `Cargo.toml` or `Cargo.lock`:
+
+<Steps>
+  <Step title="Update Cargo.lock">
+    ```bash
+    cargo update
+    ```
+  </Step>
+
+  <Step title="Regenerate Cargo.nix">
+    ```bash
+    cargo2nix-update
+    ```
+
+    This regenerates `Cargo.nix` with the updated dependency graph.
+  </Step>
+
+  <Step title="Commit Both Files">
+    ```bash
+    git add Cargo.lock Cargo.nix
+    git commit -m "Update dependencies"
+    ```
+  </Step>
+</Steps>
+
+<Warning>
+  **cargo2nix doesn't track `include_str!` file changes.** If you add/modify migration files or other embedded resources, run `cargo2nix-update` to force a rebuild by changing the hash.
+</Warning>
+
+## Cargo Build (Development)
+
+### Prerequisites
+
+<Steps>
+  <Step title="Install Rust">
+    Install Rust using rustup:
+
+    ```bash
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+    ```
+  </Step>
+
+  <Step title="Verify Installation">
+    ```bash
+    rustc --version
+    cargo --version
+    ```
+  </Step>
+</Steps>
+
+### Building with Cargo
+
+<CodeGroup>
+```bash Workspace
+# Build everything in the workspace
+cargo build --workspace
+
+# Release build
+cargo build --workspace --release
+```
+
+```bash Specific Package
+# Build just the CLI
+cargo build --release -p loom-cli
+
+# Build the server
+cargo build --release -p loom-server
+```
+
+```bash Tests
+# Run all tests
+cargo test --workspace
+
+# Test a specific crate
+cargo test -p loom-common-core
+
+# Test a specific function
+cargo test -p loom-common-core test_agent
+```
+
+```bash Linting
+# Run clippy (linter)
+cargo clippy --workspace -- -D warnings
+
+# Format code
+cargo fmt --all
+
+# Check formatting without changing files
+cargo fmt --all -- --check
+```
+</CodeGroup>
+
+### Full Check
+
+Run all quality checks:
+
+```bash
+make check
+```
+
+This runs:
+1. `cargo fmt --all -- --check` - Format verification
+2. `cargo clippy --workspace -- -D warnings` - Linting
+3. `cargo build --workspace` - Build
+4. `cargo test --workspace` - Tests
+
+## Build Profiles
+
+Loom uses optimized build profiles:
+
+### Development Profile
+
+```toml Cargo.toml
+[profile.dev]
+debug = 1                    # Reduced debug info
+split-debuginfo = "unpacked" # Faster linking
+incremental = true           # Enable incremental compilation
+```
+
+### Fast Profile
+
+For git hooks and quick iteration:
+
+```bash
+cargo build --profile dev-fast
+```
+
+```toml Cargo.toml
+[profile.dev-fast]
+inherits = "dev"
+debug = 0                    # No debug info
+codegen-units = 512          # Maximum parallelism
+```
+
+### Release Profile
+
+```toml Cargo.toml
+[profile.release]
+lto = false                  # No link-time optimization
+opt-level = 0                # No optimization for fastest compile
+codegen-units = 256          # High parallelism
+strip = "debuginfo"          # Strip debug symbols
+```
+
+<Note>
+  Loom's release profile prioritizes fast compilation over runtime performance since deployment uses Nix builds.
+</Note>
+
+## Installation Locations
+
+### System-wide Installation
+
+<Tabs>
+  <Tab title="Nix">
+    Add to your `~/.config/nixpkgs/config.nix` or NixOS configuration:
+
+    ```nix
+    {
+      environment.systemPackages = [
+        (import /path/to/loom).packages.x86_64-linux.loom-cli-c2n
+      ];
+    }
+    ```
+  </Tab>
+  <Tab title="Cargo">
+    ```bash
+    cargo install --path crates/loom-cli
+    ```
+
+    This installs to `~/.cargo/bin/loom`
+  </Tab>
+</Tabs>
+
+### Development Installation
+
+For development, use the binary directly:
+
+```bash
+# Cargo build
+./target/release/loom --version
+
+# Nix build
+./result/bin/loom --version
+```
+
+## Web Frontend
+
+The web UI is built with SvelteKit:
+
+<Steps>
+  <Step title="Install pnpm">
+    ```bash
+    curl -fsSL https://get.pnpm.io/install.sh | sh -
+    ```
+  </Step>
+
+  <Step title="Install Dependencies">
+    ```bash
+    cd web/loom-web
+    pnpm install
+    ```
+  </Step>
+
+  <Step title="Run Development Server">
+    ```bash
+    pnpm dev
+    ```
+
+    Open http://localhost:5173
+  </Step>
+
+  <Step title="Build for Production">
+    ```bash
+    pnpm build
+    ```
+  </Step>
+</Steps>
+
+## Server Deployment
+
+Loom server runs on NixOS with auto-update:
+
+### NixOS Auto-Update
+
+Deployments happen automatically on `git push` to `trunk`:
+
+```bash
+git push origin trunk
+```
+
+The production server:
+1. Checks for new commits every 10 seconds
+2. Rebuilds using Nix when changes detected
+3. Restarts the `loom-server` systemd service
+
+### Verify Deployment
+
+<Steps>
+  <Step title="Check Deployed Revision">
+    ```bash
+    sudo cat /var/lib/nixos-auto-update/deployed-revision
+    ```
+  </Step>
+
+  <Step title="Check Service Status">
+    ```bash
+    sudo systemctl status nixos-auto-update.service
+    sudo systemctl status loom-server
+    ```
+  </Step>
+
+  <Step title="View Update Logs">
+    ```bash
+    sudo journalctl -u nixos-auto-update.service -f
+    ```
+  </Step>
+
+  <Step title="Verify Health Endpoint">
+    ```bash
+    curl -s https://loom.ghuntley.com/health | jq .
+    ```
+  </Step>
+</Steps>
+
+### Force Rebuild
+
+If auto-update is stuck:
+
+```bash
+sudo rm /var/lib/nixos-auto-update/deployed-revision
+sudo systemctl start nixos-auto-update.service
+```
+
+## Database Migrations
+
+All migrations live in `crates/loom-server/migrations/`:
+
+### Adding Migrations
+
+<Steps>
+  <Step title="Create Migration File">
+    ```bash
+    # Find next available number
+    ls crates/loom-server/migrations/
+
+    # Create new migration (e.g., 025_new_feature.sql)
+    touch crates/loom-server/migrations/025_new_feature.sql
+    ```
+  </Step>
+
+  <Step title="Write SQL">
+    ```sql crates/loom-server/migrations/025_new_feature.sql
+    -- Add your migration SQL
+    CREATE TABLE IF NOT EXISTS new_table (
+      id TEXT PRIMARY KEY,
+      created_at INTEGER NOT NULL
+    );
+    ```
+  </Step>
+
+  <Step title="Force Rebuild">
+    <Warning>
+      **Critical:** cargo2nix doesn't track `include_str!` changes. You must regenerate `Cargo.nix`:
+    </Warning>
+
+    ```bash
+    cargo2nix-update
+    git add Cargo.nix crates/loom-server/migrations/025_new_feature.sql
+    git commit -m "Add new feature migration"
+    ```
+
+    Without this, the deployed binary won't include the new migration!
+  </Step>
+</Steps>
+
+### Migration Testing
+
+Test migrations locally:
+
+```bash
+LOOM_SERVER_DB_PATH=/tmp/test.db ./target/release/loom-server
+```
+
+Migrations run automatically on server startup.
+
+## Troubleshooting
+
+### Nix Build Fails
+
+```bash
+# Clear nix cache
+nix-collect-garbage
+
+# Rebuild
+nix build .#loom-cli-c2n --rebuild
+```
+
+### Cargo Build Fails
+
+```bash
+# Clean build artifacts
+cargo clean
+
+# Update dependencies
+cargo update
+
+# Rebuild
+cargo build --workspace
+```
+
+### cargo2nix Out of Sync
+
+If Nix build fails with dependency errors:
+
+```bash
+# Ensure Cargo.lock is up to date
+cargo update
+
+# Regenerate Cargo.nix
+cargo2nix-update
+
+# Try build again
+nix build .#loom-cli-c2n
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Start your first REPL session
+  </Card>
+  <Card title="Configuration" icon="gear">
+    Configure Loom for your environment
+  </Card>
+  <Card title="Development Guide" icon="code">
+    Learn about code style, testing, and contributing
+  </Card>
+  <Card title="Deployment" icon="server">
+    Deploy Loom server to production
+  </Card>
+</CardGroup>

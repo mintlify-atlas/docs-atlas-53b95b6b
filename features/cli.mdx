@@ -1,0 +1,381 @@
+---
+title: "CLI Features"
+description: "Command-line interface for Loom AI coding agent with REPL, thread management, and remote execution"
+---
+
+# CLI Features
+
+Loom's command-line interface provides an interactive REPL (Read-Eval-Print Loop) for AI-powered coding assistance, conversation persistence, and remote execution environments.
+
+## Installation
+
+```bash
+# Build from source
+cargo build --release --bin loom
+
+# Or using Nix
+nix build .#loom-cli-c2n
+```
+
+## Quick Start
+
+<Steps>
+  <Step title="Start a new session">
+    Launch the interactive REPL:
+    ```bash
+    loom
+    ```
+  </Step>
+
+  <Step title="Authenticate with server">
+    Connect to the Loom server for conversation sync:
+    ```bash
+    loom login --server-url https://loom.ghuntley.com
+    ```
+  </Step>
+
+  <Step title="Resume a previous conversation">
+    ```bash
+    loom resume [thread-id]
+    ```
+  </Step>
+</Steps>
+
+## Global Options
+
+<ParamField path="--config" type="path">
+  Path to custom configuration file
+</ParamField>
+
+<ParamField path="--workspace" type="path">
+  Workspace directory for file operations (default: current directory)
+</ParamField>
+
+<ParamField path="--log-level" type="string">
+  Override log level: trace, debug, info, warn, error
+</ParamField>
+
+<ParamField path="--json-logs" type="boolean">
+  Output logs in JSON format for structured logging
+</ParamField>
+
+<ParamField path="--server-url" type="string">
+  Loom server URL for LLM proxy and thread sync
+  
+  Default: `http://localhost:8080`  
+  Environment: `LOOM_SERVER_URL`
+</ParamField>
+
+<ParamField path="--provider" type="string">
+  LLM provider to use: `anthropic` or `openai`
+  
+  Default: `anthropic`  
+  Environment: `LOOM_LLM_PROVIDER`
+</ParamField>
+
+## Commands
+
+### Session Management
+
+<CodeGroup>
+```bash Start new session
+loom
+```
+
+```bash Resume session
+loom resume <thread-id>
+```
+
+```bash Private session (no sync)
+loom private
+```
+</CodeGroup>
+
+<Note>
+  Private sessions are stored locally only and never sync to the server. Use for sensitive work or offline development.
+</Note>
+
+### Thread Operations
+
+<Tabs>
+  <Tab title="List">
+    ```bash
+    loom list
+    ```
+    
+    Displays all local threads with metadata:
+    - Thread ID (UUIDv7 format: `T-<uuid>`)
+    - Title (auto-generated from first message)
+    - Message count
+    - Last activity timestamp
+  </Tab>
+
+  <Tab title="Search">
+    ```bash
+    loom search "query" --limit 20
+    ```
+    
+    Search threads by:
+    - Message content (full-text)
+    - Git branch name
+    - Git remote URL
+    - Commit SHA (prefix match)
+    - Tags
+    
+    <ParamField path="--json" type="boolean">
+      Output results in JSON format
+    </ParamField>
+  </Tab>
+
+  <Tab title="Share">
+    ```bash
+    # Share with organization
+    loom share <thread-id> --visibility organization
+    
+    # Share with support team
+    loom share <thread-id> --support
+    
+    # Make private
+    loom share <thread-id> --visibility private
+    ```
+    
+    Thread visibility levels:
+    - `organization`: Visible to all org members (default)
+    - `private`: Synced but only owner can access
+    - `public`: Publicly visible (use with caution)
+  </Tab>
+</Tabs>
+
+### Authentication
+
+```bash
+# Login to Loom server
+loom login
+
+# Logout
+loom logout
+```
+
+Authentication tokens are stored in the system keychain using the `keyring` crate.
+
+### Version Information
+
+```bash
+loom version
+```
+
+Displays:
+- Loom version (from `Cargo.toml`)
+- Build timestamp
+- Git commit SHA
+- Rust version used for compilation
+
+### ACP Agent Mode
+
+```bash
+loom acp-agent
+```
+
+<Note>
+  Runs Loom as an Agent Client Protocol (ACP) agent over stdio for VS Code extension integration. This mode is used internally by editor plugins.
+</Note>
+
+## Configuration
+
+Loom loads configuration from multiple sources (in priority order):
+
+1. Command-line flags (`--config`, `--workspace`, etc.)
+2. Environment variables (`LOOM_*`)
+3. Config file (`~/.config/loom/config.toml` or custom path)
+4. Built-in defaults
+
+### Example Config File
+
+```toml
+[global]
+default_provider = "anthropic"
+workspace_root = "/home/user/projects"
+
+[logging]
+level = "info"
+format = "pretty"
+
+[tools]
+[tools.workspace]
+root = "/home/user/workspace"
+```
+
+## REPL Usage
+
+Once in the REPL, you can:
+
+<Steps>
+  <Step title="Type your request">
+    ```
+    > Add error handling to the user authentication function
+    ```
+  </Step>
+
+  <Step title="Agent responds and executes tools">
+    The agent will:
+    - Read relevant files (`read_file` tool)
+    - Suggest changes
+    - Apply edits (`edit_file` tool)
+    - Run tests (`bash` tool)
+  </Step>
+
+  <Step title="Review changes">
+    All file modifications and command outputs are displayed in real-time
+  </Step>
+
+  <Step title="Continue conversation">
+    The thread persists across sessions. Resume anytime with `loom resume`.
+  </Step>
+</Steps>
+
+### REPL Controls
+
+- **Ctrl+C**: Save thread and exit gracefully
+- **Ctrl+D** (EOF): Same as Ctrl+C
+- Empty input: Ignored, reprompts
+
+## Auto-Commit
+
+Loom automatically commits changes when certain tools are executed:
+
+<Card title="Auto-commit triggers" icon="git-alt">
+  - `edit_file`: File modifications
+  - `bash`: Commands that modify the working tree
+  
+  Disable with: `LOOM_AUTO_COMMIT_DISABLE=1`
+</Card>
+
+**Configuration:**
+- Model: `claude-3-haiku-20240307` (fast, cheap)
+- Max diff size: 32 KB
+- Commit message: Auto-generated based on changes
+
+## Git Integration
+
+Loom captures git metadata for every thread:
+
+- **Initial state**: Branch, commit SHA, dirty status
+- **Final state**: Current branch, commit SHA, dirty status
+- **Commits made**: List of all commit SHAs created during the session
+- **Remote URL**: Git remote origin (normalized slug)
+
+This metadata enables:
+- Thread search by branch/repo/commit
+- Workspace history tracking
+- Collaboration insights
+
+### Git Credential Helper
+
+```bash
+# Configure git to use Loom for SCM authentication
+git config --global credential.https://loom.ghuntley.com.helper 'loom credential-helper'
+```
+
+## Advanced Commands
+
+### Spool (VCS)
+
+```bash
+loom spool <subcommand>
+```
+
+Jujutsu (jj)-based version control with tapestry naming.
+
+### Tunnel Management
+
+```bash
+# Start WireGuard tunnel
+loom tunnel up <weaver-id>
+
+# Check tunnel status
+loom tunnel status
+
+# Stop tunnel
+loom tunnel down
+```
+
+### SSH to Weaver
+
+```bash
+loom ssh <weaver-id>
+```
+
+Establishes SSH connection through WireGuard tunnel to a remote weaver.
+
+## Exit Codes
+
+- `0`: Success
+- `1`: General error (check stderr)
+- `2`: Invalid arguments
+
+## Environment Variables
+
+<ResponseField name="LOOM_SERVER_URL" type="string">
+  Server URL for LLM proxy and thread sync  
+  Default: `http://localhost:8080`
+</ResponseField>
+
+<ResponseField name="LOOM_LLM_PROVIDER" type="string">
+  LLM provider: `anthropic` or `openai`  
+  Default: `anthropic`
+</ResponseField>
+
+<ResponseField name="LOOM_AUTO_COMMIT_DISABLE" type="boolean">
+  Disable automatic git commits  
+  Values: `true`, `1`, `yes`
+</ResponseField>
+
+<ResponseField name="LOOM_THREAD_SYNC_URL" type="string">
+  Override thread sync endpoint (advanced)
+</ResponseField>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Connection refused to server">
+    Check if the server is running:
+    ```bash
+    curl http://localhost:8080/health
+    ```
+    
+    Or use the hosted version:
+    ```bash
+    loom --server-url https://loom.ghuntley.com
+    ```
+  </Accordion>
+
+  <Accordion title="Thread not found">
+    List available threads:
+    ```bash
+    loom list
+    ```
+    
+    Thread IDs use UUIDv7 format starting with `T-`.
+  </Accordion>
+
+  <Accordion title="Tool execution fails">
+    Enable debug logging:
+    ```bash
+    loom --log-level debug
+    ```
+    
+    Check workspace permissions and file paths.
+  </Accordion>
+
+  <Accordion title="Auto-commit not working">
+    Verify you're in a git repository:
+    ```bash
+    git status
+    ```
+    
+    Check if auto-commit is disabled:
+    ```bash
+    echo $LOOM_AUTO_COMMIT_DISABLE
+    ```
+  </Accordion>
+</AccordionGroup>

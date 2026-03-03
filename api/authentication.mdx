@@ -1,0 +1,419 @@
+---
+title: Authentication Endpoints
+description: OAuth, magic links, device code flow, and session management
+---
+
+## Overview
+
+Loom supports multiple authentication flows:
+
+- **OAuth 2.0**: GitHub, Google, and Okta (enterprise)
+- **Magic Links**: Passwordless email authentication
+- **Device Code Flow**: CLI and VS Code authentication
+- **Session Cookies**: Web browser sessions
+- **API Keys**: Programmatic access with scoped permissions
+
+## Get Available Providers
+
+```http
+GET /auth/providers
+```
+
+Returns the list of authentication providers configured on the server.
+
+### Response
+
+<ResponseField name="providers" type="string[]">
+  Array of provider names (e.g., `["github", "google", "magic_link"]`)
+</ResponseField>
+
+### Example
+
+```bash
+curl https://loom.ghuntley.com/auth/providers
+```
+
+```json
+{
+  "providers": ["github", "google", "okta", "magic_link"]
+}
+```
+
+## Get Current User
+
+```http
+GET /auth/me
+```
+
+Returns the currently authenticated user's information. Requires valid session cookie or API key.
+
+### Response
+
+<ResponseField name="id" type="string">
+  User ID (UUID)
+</ResponseField>
+
+<ResponseField name="display_name" type="string">
+  User's display name
+</ResponseField>
+
+<ResponseField name="username" type="string" nullable>
+  Username (if set)
+</ResponseField>
+
+<ResponseField name="email" type="string" nullable>
+  Primary email address
+</ResponseField>
+
+<ResponseField name="avatar_url" type="string" nullable>
+  Profile avatar URL
+</ResponseField>
+
+<ResponseField name="locale" type="string" nullable>
+  Preferred locale (e.g., `"en"`, `"es"`, `"ar"`)
+</ResponseField>
+
+<ResponseField name="global_roles" type="string[]">
+  Array of global role names (e.g., `["system_admin", "support"]`)
+</ResponseField>
+
+<ResponseField name="created_at" type="string">
+  ISO 8601 timestamp of account creation
+</ResponseField>
+
+### Example
+
+```bash
+curl -H "Authorization: Bearer loom_sk_..." \
+  https://loom.ghuntley.com/auth/me
+```
+
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "display_name": "Alice Johnson",
+  "username": "alice",
+  "email": "alice@example.com",
+  "avatar_url": "https://avatars.githubusercontent.com/u/12345",
+  "locale": "en",
+  "global_roles": ["user"],
+  "created_at": "2025-01-15T08:30:00Z"
+}
+```
+
+## Get WebSocket Token
+
+```http
+GET /auth/ws-token
+```
+
+Returns a short-lived token for WebSocket authentication. Required because HttpOnly cookies cannot be accessed by JavaScript.
+
+### Response
+
+<ResponseField name="token" type="string">
+  WebSocket token (prefix: `ws_`). Valid for 30 seconds, single-use.
+</ResponseField>
+
+<ResponseField name="expires_in" type="integer">
+  Token lifetime in seconds (30)
+</ResponseField>
+
+### Example
+
+```bash
+curl -H "Cookie: loom_session=..." \
+  https://loom.ghuntley.com/auth/ws-token
+```
+
+```json
+{
+  "token": "ws_a1b2c3d4e5f6...",
+  "expires_in": 30
+}
+```
+
+**Usage**: Send token in WebSocket first message:
+
+```json
+{"type": "auth", "token": "ws_a1b2c3d4e5f6..."}
+```
+
+## Logout
+
+```http
+POST /auth/logout
+```
+
+Invalidates the current session and clears the session cookie.
+
+### Response
+
+<ResponseField name="message" type="string">
+  Success message
+</ResponseField>
+
+### Example
+
+```bash
+curl -X POST -H "Cookie: loom_session=..." \
+  https://loom.ghuntley.com/auth/logout
+```
+
+```json
+{
+  "message": "Logged out successfully"
+}
+```
+
+## OAuth Login (GitHub)
+
+```http
+GET /auth/login/github
+```
+
+Initiates GitHub OAuth flow. Redirects to GitHub for authorization.
+
+### Query Parameters
+
+<ParamField query="redirect_uri" type="string" optional>
+  URL to redirect after successful login (default: `/`)
+</ParamField>
+
+### Example
+
+```bash
+curl -L https://loom.ghuntley.com/auth/login/github?redirect_uri=/dashboard
+```
+
+User is redirected to GitHub, then back to `/auth/callback/github` after authorization.
+
+## OAuth Callback (GitHub)
+
+```http
+GET /auth/callback/github
+```
+
+Handles OAuth callback from GitHub. Sets session cookie and redirects to `redirect_uri`.
+
+### Query Parameters
+
+<ParamField query="code" type="string" required>
+  OAuth authorization code from GitHub
+</ParamField>
+
+<ParamField query="state" type="string" required>
+  CSRF token from initial login request
+</ParamField>
+
+<ParamField query="error" type="string" optional>
+  Error code if authorization failed
+</ParamField>
+
+<ParamField query="error_description" type="string" optional>
+  Human-readable error description
+</ParamField>
+
+### Example
+
+```
+GET /auth/callback/github?code=abc123&state=xyz789
+```
+
+Sets `loom_session` cookie and redirects to original `redirect_uri`.
+
+## Magic Link Request
+
+```http
+POST /auth/magic-link
+```
+
+Sends a passwordless login link to the user's email address.
+
+### Request Body
+
+<ParamField body="email" type="string" required>
+  Email address to send magic link to
+</ParamField>
+
+### Response
+
+<ResponseField name="message" type="string">
+  Success message
+</ResponseField>
+
+### Example
+
+```bash
+curl -X POST https://loom.ghuntley.com/auth/magic-link \
+  -H "Content-Type: application/json" \
+  -d '{"email": "alice@example.com"}'
+```
+
+```json
+{
+  "message": "Magic link sent to alice@example.com"
+}
+```
+
+The email contains a link: `https://loom.ghuntley.com/auth/magic-link/verify?token=...`
+
+## Magic Link Verify
+
+```http
+GET /auth/magic-link/verify
+```
+
+Verifies the magic link token and creates a session.
+
+### Query Parameters
+
+<ParamField query="token" type="string" required>
+  Magic link token from email
+</ParamField>
+
+<ParamField query="redirect_uri" type="string" optional>
+  URL to redirect after login (default: `/`)
+</ParamField>
+
+### Example
+
+```
+GET /auth/magic-link/verify?token=abc123xyz789&redirect_uri=/dashboard
+```
+
+Sets `loom_session` cookie and redirects to `/dashboard`.
+
+## Device Code Flow (CLI)
+
+The device code flow enables CLI and VS Code authentication without opening a browser on the same machine.
+
+### Step 1: Start Device Code Flow
+
+```http
+POST /auth/device/start
+```
+
+Initiates device code flow and returns a user code and verification URL.
+
+#### Response
+
+<ResponseField name="device_code" type="string">
+  Device code for polling (opaque token)
+</ResponseField>
+
+<ResponseField name="user_code" type="string">
+  Short code to display to user (e.g., `"ABCD-1234"`)
+</ResponseField>
+
+<ResponseField name="verification_url" type="string">
+  URL where user enters the code (e.g., `"https://loom.ghuntley.com/device"`)
+</ResponseField>
+
+<ResponseField name="expires_in" type="integer">
+  Expiry time in seconds (default: 600)
+</ResponseField>
+
+#### Example
+
+```bash
+curl -X POST https://loom.ghuntley.com/auth/device/start
+```
+
+```json
+{
+  "device_code": "opaque_device_token_abc123",
+  "user_code": "ABCD-1234",
+  "verification_url": "https://loom.ghuntley.com/device",
+  "expires_in": 600
+}
+```
+
+### Step 2: Poll for Completion
+
+```http
+POST /auth/device/poll
+```
+
+Polls for user authorization. Returns `pending` until user completes authorization.
+
+#### Request Body
+
+<ParamField body="device_code" type="string" required>
+  Device code from `/auth/device/start`
+</ParamField>
+
+#### Response (Pending)
+
+```json
+{
+  "status": "pending"
+}
+```
+
+#### Response (Completed)
+
+```json
+{
+  "status": "completed",
+  "access_token": "loom_sk_..."
+}
+```
+
+#### Response (Expired)
+
+```json
+{
+  "status": "expired"
+}
+```
+
+#### Example
+
+```bash
+curl -X POST https://loom.ghuntley.com/auth/device/poll \
+  -H "Content-Type: application/json" \
+  -d '{"device_code": "opaque_device_token_abc123"}'
+```
+
+Poll every 5 seconds until status is `completed` or `expired`.
+
+### Step 3: User Completes Authorization
+
+User visits `https://loom.ghuntley.com/device`, enters the user code, and authorizes:
+
+```http
+POST /auth/device/complete
+```
+
+#### Request Body
+
+<ParamField body="user_code" type="string" required>
+  User code displayed by CLI (e.g., `"ABCD-1234"`)
+</ParamField>
+
+#### Response
+
+```json
+{
+  "message": "Device authorized successfully"
+}
+```
+
+## Error Responses
+
+All auth endpoints return errors in this format:
+
+```json
+{
+  "error": "invalid_token",
+  "message": "Magic link token is invalid or expired"
+}
+```
+
+Common error codes:
+
+- `unauthorized`: Authentication required
+- `invalid_token`: Token is invalid or expired
+- `provider_not_configured`: OAuth provider not enabled
+- `email_send_failed`: Failed to send magic link email

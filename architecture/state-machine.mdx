@@ -1,0 +1,538 @@
+---
+title: Agent State Machine
+description: Event-driven state machine for conversation flow and tool execution with explicit transitions and retry mechanisms
+---
+
+The Loom agent uses an **explicit, event-driven state machine** to manage conversation flow and tool execution. This design provides predictable behavior, clear ownership of context, graceful error recovery, and clean separation between state logic and I/O operations.
+
+## Design Principles
+
+<CardGroup cols={2}>
+  <Card title="Predictable Behavior" icon="route">
+    All state transitions are explicit and testable with exhaustive pattern matching.
+  </Card>
+  <Card title="Clear Ownership" icon="box">
+    Each state carries its required context (conversation, retries, etc.).
+  </Card>
+  <Card title="Graceful Recovery" icon="shield-check">
+    Built-in retry mechanisms with bounded attempts and backoff.
+  </Card>
+  <Card title="Clean Separation" icon="layer-group">
+    State machine logic is synchronous and pure; caller manages async I/O.
+  </Card>
+</CardGroup>
+
+## State Machine Overview
+
+The state machine receives `AgentEvent`s and returns `AgentAction`s that the caller must execute. This inversion of control allows the caller to manage async operations (LLM calls, tool execution) while the state machine remains synchronous and pure.
+
+```mermaid
+stateDiagram-v2
+    [*] --> WaitingForUserInput : Agent::new()
+    
+    WaitingForUserInput --> CallingLlm : UserInput
+    
+    CallingLlm --> CallingLlm : TextDelta / ToolCallDelta
+    CallingLlm --> ProcessingLlmResponse : Completed
+    CallingLlm --> Error : Error (retries < max)
+    CallingLlm --> WaitingForUserInput : Error (retries >= max)
+    
+    ProcessingLlmResponse --> ExecutingTools : has tool calls
+    ProcessingLlmResponse --> WaitingForUserInput : no tool calls
+    
+    ExecutingTools --> ExecutingTools : ToolCompleted (some pending)
+    ExecutingTools --> PostToolsHook : ToolCompleted (all done, mutating)
+    ExecutingTools --> CallingLlm : ToolCompleted (all done, no mutation)
+    
+    PostToolsHook --> CallingLlm : PostToolsHookCompleted
+    
+    Error --> CallingLlm : RetryTimeoutFired
+    
+    WaitingForUserInput --> ShuttingDown : ShutdownRequested
+    CallingLlm --> ShuttingDown : ShutdownRequested
+    ProcessingLlmResponse --> ShuttingDown : ShutdownRequested
+    ExecutingTools --> ShuttingDown : ShutdownRequested
+    PostToolsHook --> ShuttingDown : ShutdownRequested
+    Error --> ShuttingDown : ShutdownRequested
+    
+    ShuttingDown --> [*]
+```
+
+## States
+
+### AgentState Enum
+
+```rust
+pub enum AgentState {
+    WaitingForUserInput {
+        conversation: ConversationContext,
+    },
+    CallingLlm {
+        conversation: ConversationContext,
+        retries: u32,
+    },
+    ProcessingLlmResponse {
+        conversation: ConversationContext,
+        response: LlmResponse,
+    },
+    ExecutingTools {
+        conversation: ConversationContext,
+        executions: Vec<ToolExecutionStatus>,
+    },
+    PostToolsHook {
+        conversation: ConversationContext,
+        pending_llm_request: LlmRequest,
+        completed_tools: Vec<CompletedToolInfo>,
+    },
+    Error {
+        conversation: ConversationContext,
+        error: AgentError,
+        retries: u32,
+        origin: ErrorOrigin,
+    },
+    ShuttingDown,
+}
+```
+
+### State Details
+
+<AccordionGroup>
+  <Accordion title="WaitingForUserInput">
+    **Initial and terminal state for user turns**
+    
+    The agent is idle and awaits user input. The conversation context preserves all prior messages.
+    
+    **Transitions:**
+    - `UserInput` → `CallingLlm`
+    - `ShutdownRequested` → `ShuttingDown`
+  </Accordion>
+
+  <Accordion title="CallingLlm">
+    **Active LLM request in flight**
+    
+    The `retries` counter tracks how many retry attempts have been made for the current request.
+    
+    **Transitions:**
+    - `TextDelta` → `CallingLlm` (streaming text)
+    - `ToolCallDelta` → `CallingLlm` (streaming tool call)
+    - `Completed` → `ProcessingLlmResponse`
+    - `Error` (retries < max) → `Error`
+    - `Error` (retries >= max) → `WaitingForUserInput`
+    - `ShutdownRequested` → `ShuttingDown`
+  </Accordion>
+
+  <Accordion title="ProcessingLlmResponse">
+    **Transient state for examining an LLM response**
+    
+    Immediately transitions to either `ExecutingTools` (if tool calls present) or `WaitingForUserInput` (if text-only response).
+    
+    **Transitions:**
+    - Has tool calls → `ExecutingTools`
+    - No tool calls → `WaitingForUserInput`
+    - `ShutdownRequested` → `ShuttingDown`
+  </Accordion>
+
+  <Accordion title="ExecutingTools">
+    **Tracks multiple concurrent tool executions**
+    
+    Each execution progresses through `Pending` → `Running` → `Completed`. The state tracks all executions via `Vec<ToolExecutionStatus>`.
+    
+    **Transitions:**
+    - `ToolCompleted` (some pending) → `ExecutingTools`
+    - `ToolCompleted` (all done, mutating tools) → `PostToolsHook`
+    - `ToolCompleted` (all done, no mutation) → `CallingLlm`
+    - `ShutdownRequested` → `ShuttingDown`
+  </Accordion>
+
+  <Accordion title="PostToolsHook">
+    **Runs post-tool hooks after tool execution**
+    
+    This state enables features like auto-commit that need to run after file-modifying tools (e.g., `edit_file`, `bash`).
+    
+    **Fields:**
+    - `pending_llm_request` - The next LLM request to send after hooks complete
+    - `completed_tools` - Information about which tools completed (for hook decision-making)
+    
+    **Transitions:**
+    - `PostToolsHookCompleted` → `CallingLlm`
+    - `ShutdownRequested` → `ShuttingDown`
+  </Accordion>
+
+  <Accordion title="Error">
+    **Holds failed state with retry information**
+    
+    The `origin` field (`Llm`, `Tool`, or `Io`) determines retry strategy.
+    
+    **Transitions:**
+    - `RetryTimeoutFired` → `CallingLlm`
+    - `ShutdownRequested` → `ShuttingDown`
+  </Accordion>
+
+  <Accordion title="ShuttingDown">
+    **Terminal state**
+    
+    No transitions out. The agent should be dropped after reaching this state.
+  </Accordion>
+</AccordionGroup>
+
+## Events
+
+### AgentEvent Enum
+
+```rust
+pub enum AgentEvent {
+    UserInput(Message),
+    LlmEvent(LlmEvent),
+    ToolProgress(ToolProgressEvent),
+    ToolCompleted {
+        call_id: String,
+        outcome: ToolExecutionOutcome,
+    },
+    PostToolsHookCompleted {
+        action_taken: bool,
+    },
+    RetryTimeoutFired,
+    ShutdownRequested,
+}
+```
+
+### LlmEvent Sub-variants
+
+```rust
+pub enum LlmEvent {
+    TextDelta {
+        content: String,
+    },
+    ToolCallDelta {
+        call_id: String,
+        tool_name: String,
+        arguments_fragment: String,
+    },
+    Completed(LlmResponse),
+    Error(LlmError),
+}
+```
+
+### ToolExecutionOutcome
+
+```rust
+pub enum ToolExecutionOutcome {
+    Success {
+        call_id: String,
+        output: serde_json::Value,
+    },
+    Error {
+        call_id: String,
+        error: ToolError,
+    },
+}
+```
+
+## Actions
+
+### AgentAction Enum
+
+Actions are returned to the caller indicating what I/O operation to perform:
+
+```rust
+pub enum AgentAction {
+    SendLlmRequest(LlmRequest),
+    ExecuteTools(Vec<ToolCall>),
+    RunPostToolsHook {
+        completed_tools: Vec<CompletedToolInfo>,
+    },
+    WaitForInput,
+    DisplayMessage(String),
+    DisplayError(String),
+    Shutdown,
+}
+```
+
+<Info>
+  The caller is responsible for executing actions and feeding events back into the state machine via `agent.handle_event(event)`.
+</Info>
+
+## State Transitions
+
+### Transition Table
+
+| Current State | Event | New State | Action |
+|---------------|-------|-----------|--------|
+| `WaitingForUserInput` | `UserInput(msg)` | `CallingLlm` | `SendLlmRequest` |
+| `CallingLlm` | `LlmEvent::TextDelta` | `CallingLlm` | `DisplayMessage` |
+| `CallingLlm` | `LlmEvent::ToolCallDelta` | `CallingLlm` | `WaitForInput` |
+| `CallingLlm` | `LlmEvent::Completed` | `ProcessingLlmResponse` | (internal) |
+| `CallingLlm` | `LlmEvent::Error` (retries < max) | `Error` | `WaitForInput` |
+| `CallingLlm` | `LlmEvent::Error` (retries >= max) | `WaitingForUserInput` | `DisplayError` |
+| `ProcessingLlmResponse` | (has tool calls) | `ExecutingTools` | `ExecuteTools` |
+| `ProcessingLlmResponse` | (no tool calls) | `WaitingForUserInput` | `WaitForInput` |
+| `ExecutingTools` | `ToolCompleted` (some pending) | `ExecutingTools` | `WaitForInput` |
+| `ExecutingTools` | `ToolCompleted` (all done, mutating) | `PostToolsHook` | `RunPostToolsHook` |
+| `ExecutingTools` | `ToolCompleted` (all done, no mutation) | `CallingLlm` | `SendLlmRequest` |
+| `PostToolsHook` | `PostToolsHookCompleted` | `CallingLlm` | `SendLlmRequest` |
+| `Error` (origin=Llm) | `RetryTimeoutFired` | `CallingLlm` | `SendLlmRequest` |
+| _any state_ | `ShutdownRequested` | `ShuttingDown` | `Shutdown` |
+
+## Implementation
+
+### Core Method
+
+```rust
+impl Agent {
+    pub fn handle_event(
+        &mut self,
+        event: AgentEvent
+    ) -> AgentResult<AgentAction> {
+        // Pattern match on (current_state, event)
+        // Update self.state
+        // Return action for caller to execute
+    }
+}
+```
+
+<Note>
+  The `handle_event` method is **synchronous** and returns immediately. No async operations are performed inside the state machine.
+</Note>
+
+### Example Usage
+
+```rust
+let mut agent = Agent::new(config);
+
+// User sends a message
+let action = agent.handle_event(AgentEvent::UserInput(message))?;
+match action {
+    AgentAction::SendLlmRequest(request) => {
+        // Execute async LLM call
+        let mut stream = llm_client.complete_streaming(request).await?;
+        
+        // Feed stream events back to state machine
+        while let Some(event) = stream.next().await {
+            let action = agent.handle_event(AgentEvent::LlmEvent(event))?;
+            // Handle action...
+        }
+    }
+    AgentAction::ExecuteTools(tool_calls) => {
+        // Execute tools in parallel
+        for tool_call in tool_calls {
+            let outcome = execute_tool(tool_call).await?;
+            let action = agent.handle_event(AgentEvent::ToolCompleted {
+                call_id: tool_call.id,
+                outcome,
+            })?;
+            // Handle action...
+        }
+    }
+    _ => {}
+}
+```
+
+## Design Decisions
+
+### Why Explicit State Machine vs Implicit
+
+<Steps>
+  <Step title="Testability">
+    Every state and transition can be unit tested in isolation. Property-based tests verify invariants like "shutdown always succeeds from any state".
+  </Step>
+  
+  <Step title="Debuggability">
+    State transitions are logged with `tracing::info!`, making it easy to trace agent behavior in production.
+  </Step>
+  
+  <Step title="No Hidden State">
+    All context is carried explicitly in state variants. There are no ambient flags or mutable fields that could get out of sync.
+  </Step>
+  
+  <Step title="Exhaustive Matching">
+    Rust's `match` ensures all state/event combinations are handled. New events or states trigger compiler errors until addressed.
+  </Step>
+</Steps>
+
+### Why Events Are Processed Synchronously
+
+The `handle_event` method is synchronous and returns immediately:
+
+```rust
+pub fn handle_event(&mut self, event: AgentEvent) -> AgentResult<AgentAction>
+```
+
+**Rationale:**
+
+1. **Separation of Concerns** - The state machine decides _what_ to do; the caller decides _how_ to do it (async, parallel, etc.)
+2. **Backpressure** - The caller controls the pace of event delivery. No internal queues or background tasks
+3. **Determinism** - Given the same sequence of events, the state machine produces the same sequence of actions (essential for testing and replay)
+4. **Flexibility** - The caller can implement different execution strategies (single-threaded, tokio, async-std) without changing the state machine
+
+### How Conversation Context Is Threaded
+
+Each state variant carries its own `ConversationContext`:
+
+```rust
+pub enum AgentState {
+    WaitingForUserInput {
+        conversation: ConversationContext,
+    },
+    CallingLlm {
+        conversation: ConversationContext,
+        retries: u32,
+    },
+    // ...
+}
+```
+
+During transitions, the context is cloned and updated:
+
+- `UserInput` → message appended to conversation
+- `LlmEvent::Completed` → assistant message appended
+- `ToolCompleted` (all done) → tool result messages appended
+
+This ensures the conversation history is always consistent with the current state.
+
+## Testing Guidelines
+
+### Unit Tests
+
+Verify specific state transitions in isolation:
+
+```rust
+#[test]
+fn transitions_to_calling_llm_on_user_input() {
+    let mut agent = Agent::new(config);
+    let action = agent.handle_event(
+        AgentEvent::UserInput(Message::user("hello"))
+    ).unwrap();
+    
+    assert!(matches!(action, AgentAction::SendLlmRequest(_)));
+    assert!(matches!(agent.state(), AgentState::CallingLlm { .. }));
+}
+```
+
+### Property Tests
+
+Verify invariants hold across all configurations:
+
+```rust
+proptest! {
+    #[test]
+    fn agent_always_starts_in_waiting(config in any::<AgentConfig>()) {
+        let agent = Agent::new(config);
+        assert!(matches!(agent.state(), AgentState::WaitingForUserInput { .. }));
+    }
+    
+    #[test]
+    fn shutdown_succeeds_from_any_state(state in any::<AgentState>()) {
+        let mut agent = Agent::with_state(state);
+        let action = agent.handle_event(AgentEvent::ShutdownRequested).unwrap();
+        assert!(matches!(action, AgentAction::Shutdown));
+        assert!(matches!(agent.state(), AgentState::ShuttingDown));
+    }
+}
+```
+
+### Integration Tests
+
+Verify end-to-end flows through multiple transitions:
+
+```rust
+#[tokio::test]
+async fn completes_full_conversation_cycle() {
+    let mut agent = Agent::new(config);
+    let llm_client = MockLlmClient::new();
+    
+    // User input
+    let action = agent.handle_event(
+        AgentEvent::UserInput(Message::user("hello"))
+    ).unwrap();
+    
+    // LLM completion
+    let action = agent.handle_event(
+        AgentEvent::LlmEvent(LlmEvent::Completed(response))
+    ).unwrap();
+    
+    // Back to waiting
+    assert!(matches!(agent.state(), AgentState::WaitingForUserInput { .. }));
+}
+```
+
+## Extension Guide
+
+### Adding a New State
+
+<Steps>
+  <Step title="Add variant to AgentState">
+    ```rust
+    pub enum AgentState {
+        // existing variants...
+        NewState {
+            conversation: ConversationContext,
+            custom_field: CustomType,
+        },
+    }
+    ```
+  </Step>
+  
+  <Step title="Update name() method">
+    ```rust
+    Self::NewState { .. } => "NewState",
+    ```
+  </Step>
+  
+  <Step title="Update conversation() accessors">
+    Handle the new variant in `agent.rs`.
+  </Step>
+  
+  <Step title="Add transition handlers">
+    ```rust
+    (AgentState::NewState { conversation, .. }, AgentEvent::SomeEvent) => {
+        // transition logic
+    }
+    ```
+  </Step>
+  
+  <Step title="Add tests">
+    Verify transitions to/from the new state.
+  </Step>
+</Steps>
+
+### Adding a New Event
+
+<Steps>
+  <Step title="Add variant to AgentEvent">
+    ```rust
+    pub enum AgentEvent {
+        // existing variants...
+        NewEvent { payload: PayloadType },
+    }
+    ```
+  </Step>
+  
+  <Step title="Handle the event">
+    In each relevant state within `handle_event()`.
+  </Step>
+  
+  <Step title="Update catch-all pattern">
+    Invalid transitions log a warning and return `WaitForInput`.
+  </Step>
+  
+  <Step title="Add property tests">
+    Verify the event is handled correctly from all reachable states.
+  </Step>
+</Steps>
+
+## Source Files
+
+<CardGroup cols={2}>
+  <Card title="state.rs" icon="file-code" href="https://github.com/ghuntley/loom/blob/trunk/crates/loom-common-core/src/state.rs">
+    State and event type definitions
+  </Card>
+  <Card title="agent.rs" icon="file-code" href="https://github.com/ghuntley/loom/blob/trunk/crates/loom-common-core/src/agent.rs">
+    State machine implementation
+  </Card>
+  <Card title="State Machine Spec" icon="file-lines" href="https://github.com/ghuntley/loom/blob/trunk/specs/state-machine.md">
+    Detailed state machine specification
+  </Card>
+  <Card title="Architecture Overview" icon="sitemap" href="/architecture/overview">
+    High-level system architecture
+  </Card>
+</CardGroup>

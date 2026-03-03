@@ -1,0 +1,125 @@
+{
+  "projectType": "saas",
+  "projectName": "Loom",
+  "projectDescription": "AI-powered coding agent with REPL interface, remote execution environments, and comprehensive observability",
+  "theme": "aspen",
+  "primaryColor": "#8B5CF6",
+  "lightColor": "#A78BFA",
+  "darkColor": "#6D28D9",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Core Features",
+            "pages": [
+              "features/cli",
+              "features/server",
+              "features/weavers",
+              "features/tools",
+              "features/thread-system"
+            ]
+          },
+          {
+            "group": "Architecture",
+            "pages": [
+              "architecture/overview",
+              "architecture/llm-proxy",
+              "architecture/workspace-structure",
+              "architecture/state-machine"
+            ]
+          },
+          {
+            "group": "Integrations",
+            "pages": [
+              "integrations/authentication",
+              "integrations/llm-providers",
+              "integrations/github",
+              "integrations/editors"
+            ]
+          },
+          {
+            "group": "Observability",
+            "pages": [
+              "observability/analytics",
+              "observability/crash-tracking",
+              "observability/cron-monitoring",
+              "observability/sessions"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "deployment/server-setup",
+              "deployment/kubernetes",
+              "deployment/configuration",
+              "deployment/database"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "HTTP API",
+            "pages": [
+              "api/overview",
+              "api/authentication",
+              "api/threads",
+              "api/weavers",
+              "api/llm-proxy"
+            ]
+          },
+          {
+            "group": "CLI Commands",
+            "pages": [
+              "cli/overview",
+              "cli/repl",
+              "cli/weaver",
+              "cli/auth"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Interactive REPL with LLM-powered agents",
+    "Server-side LLM proxy architecture",
+    "Remote execution environments (Weavers) via Kubernetes",
+    "Thread persistence with FTS5 search",
+    "Multi-provider LLM support (Anthropic, OpenAI, Vertex AI)",
+    "Comprehensive tool system (file operations, bash, web search)",
+    "OAuth and magic link authentication",
+    "PostHog-style analytics with identity resolution",
+    "Crash tracking with symbolication",
+    "Feature flags and experimentation framework"
+  ],
+  "publicApiSurface": [
+    "POST /api/threads - Create conversation thread",
+    "GET /api/threads/{id} - Get thread by ID",
+    "POST /api/weavers - Create remote weaver pod",
+    "GET /api/weavers - List weavers",
+    "DELETE /api/weavers/{id} - Delete weaver",
+    "POST /proxy/{provider}/complete - LLM completion proxy",
+    "POST /proxy/{provider}/stream - LLM streaming proxy",
+    "POST /auth/login - Authenticate user",
+    "POST /auth/device/code - Device code flow",
+    "GET /health - Health check",
+    "loom - Start interactive REPL",
+    "loom new - Create new weaver",
+    "loom attach - Attach to weaver",
+    "loom weaver ps - List weavers",
+    "loom login - Authenticate with server"
+  ]
+}
